@@ -1,4 +1,4 @@
-# TicTacToe using OCaml
+# Liar's Dice using OCaml
 
 To make a dev-environment, press the green "Code" button, then select "+" next to "Codespaces".  A new Codespace will open.  It currently takes 20-40 minutes to initialize; please be patient.
 
@@ -36,9 +36,7 @@ dune promote
 
 To update the javascript:
 ```shell
-cp _build/default/ui/tictactoe_ui.bc.js generated_js/
+cp _build/default/ui/ui.bc.js generated_js/
 ```
 Then commit the changes and surf to your github.io to see you site:
-https://yoav-zibin.github.io/oxcaml/
-
-
+https://Anuar-Burkitbayev.github.io/liars-dice/
