@@ -1,6 +1,6 @@
 {
         "build": {      "dockerfile": "Dockerfile" },
-        "name": "OCaml TicTacToe",
+        "name": "OCaml Liar's Dice",
         "customizations": {
                 "vscode": {
                         "extensions": [
