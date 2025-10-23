@@ -36,8 +36,7 @@ module Bid = struct
     match previous with
     | None -> true
     | Some prev ->
-      (next.count > prev.count && next.value >= prev.value)
-      || (next.count = prev.count && next.value > prev.value)
+      next.count > prev.count || (next.count = prev.count && next.value > prev.value)
   ;;
 end
 

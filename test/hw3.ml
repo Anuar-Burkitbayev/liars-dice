@@ -2,47 +2,8 @@ open! Core
 open Logic_library
 open Hw2
 
-let () =
-  (* Initialize random number generator with a fixed seed for tests *)
-  Random.init 12345
-;;
-
+let () = Random.init 12345
 let ok_exn result = Result.ok result |> Option.value_exn
-
-let pretty_print_round round =
-  let p1_hand = Round.hand_of round Player.Player1 in
-  let p2_hand = Round.hand_of round Player.Player2 in
-  let current_bid = Round.get_current_bid round in
-  let current_player = Round.get_current_player round in
-  printf "\nCurrent player: %s\n" 
-    (match current_player with
-     | Player.Player1 -> "Player 1"
-     | Player.Player2 -> "Player 2");
-  printf "Player 1 hand: %s\n" 
-    (List.to_string ~f:Int.to_string p1_hand);
-  printf "Player 2 hand: %s\n"
-    (List.to_string ~f:Int.to_string p2_hand);
-  match current_bid with
-  | None -> printf "No current bid\n"
-  | Some bid -> 
-    printf "Current bid: %d dice showing %d\n" bid.count bid.value
-;;
-
-let pretty_print_game game =
-  let p1_wins = Game.rounds_won_by game Player.Player1 in
-  let p2_wins = Game.rounds_won_by game Player.Player2 in
-  printf "\nGame State:\n";
-  printf "Player 1 rounds won: %d\n" p1_wins;
-  printf "Player 2 rounds won: %d\n" p2_wins;
-  match Game.get_winner game with
-  | Some Player.Player1 -> printf "Player 1 has won the game!\n"
-  | Some Player.Player2 -> printf "Player 2 has won the game!\n"
-  | None ->
-    printf "Game in progress\n";
-    match Game.current_round game with
-    | None -> printf "No active round\n"
-    | Some round -> pretty_print_round round
-;;
 
 (* Basic Game Setup Tests *)
 let%test "Game initialization with 5 dice per player" =
@@ -202,88 +163,48 @@ let%test "Game progression - calling liar correctly updates game state" =
 ;;
 
 (* Random Walk Test *)
-
-let%expect_test "Random walk with pretty print" =
-  let initial_round = Round.init ~p1_dice:5 ~p2_dice:5 in
-  printf "\nInitial state:\n";
-  pretty_print_round initial_round;
-  
-  let rec play_and_print_random_moves round moves_taken =
-    if moves_taken >= 100
-    then `MaxMoves
+let%expect_test "Random walk - complete game simulation" =
+  let rec play_round round moves_count =
+    if moves_count > 50
+    then Error "Movecount too high"
     else (
-      let possible_moves = Round.get_all_moves round in
-      match possible_moves with
-      | [] -> `NoMoves
-      | moves ->
-        let random_move = List.random_element_exn moves in
+      let moves = Round.get_all_moves round in
+      match moves with
+      | [] -> Error "No valid moves available"
+      | _ ->
+        let random_move = List.nth_exn moves (Random.int (List.length moves)) in
         (match random_move with
-         | `CallLiar ->
-           printf "\nMove %d: Calling Liar!\n" moves_taken;
-           (match Round.call_liar round with
-            | Ok (winner, message) -> 
-              printf "Result: %s\n" message;
-              `LiarCalled winner
-            | Error _ -> `Error)
          | `Bid bid ->
-           printf "\nMove %d: Bidding %d dice showing %d\n" 
-             moves_taken bid.count bid.value;
            (match Round.make_bid round bid with
-            | Ok new_round -> 
-              pretty_print_round new_round;
-              play_and_print_random_moves new_round (moves_taken + 1)
-            | Error _ -> `Error)))
+            | Ok new_round -> play_round new_round (moves_count + 1)
+            | Error _ -> Error "Invalid bid generated")
+         | `CallLiar ->
+           (match Round.call_liar round with
+            | Ok (winner, _) -> Ok winner
+            | Error _ -> Error "Invalid liar call")))
   in
-  let result = play_and_print_random_moves initial_round 0 in
-  printf "\nFinal result: ";
-  (match result with
-   | `MaxMoves -> printf "Random walk reached maximum moves limit\n"
-   | `NoMoves -> printf "Random walk ended with no possible moves\n"
-   | `LiarCalled winner ->
-     printf "Random walk ended with liar being called. Winner: %s\n"
-       (match winner with
-        | Player.Player1 -> "Player 1"
-        | Player.Player2 -> "Player 2")
-   | `Error -> printf "Random walk ended with an error\n");
-  [%expect {|
-  Initial state:
-    Current player: Player 1
-    Player 1 hand: (1 2 6 1 4)
-    Player 2 hand: (4 1 5 1 1)
-    No current bid
-
-
-    Move 0: Bidding 3 dice showing 5
-
-
-    Current player: Player 2
-    Player 1 hand: (1 2 6 1 4)
-    Player 2 hand: (4 1 5 1 1)
-    Current bid: 3 dice showing 5
-  
-
-    Move 1: Bidding 6 dice showing 6
-  
-
-    Current player: Player 1
-    Player 1 hand: (1 2 6 1 4)
-    Player 2 hand: (4 1 5 1 1)
-    Current bid: 6 dice showing 6
-  
-
-    Move 2: Bidding 7 dice showing 6
-  
-
-    Current player: Player 2
-    Player 1 hand: (1 2 6 1 4)
-    Player 2 hand: (4 1 5 1 1)
-    Current bid: 7 dice showing 6
-  
-
-    Move 3: Calling Liar!
-      Result: Caught in a lie! There is only 1 6
-  
-
-    Final result: Random walk ended with liar being called. Winner: Player 2|}]
+  let rec play_game game rounds_played =
+    if rounds_played > 3
+    then Error "Max rounds exceeded"
+    else (
+      match Game.get_winner game with
+      | Some winner ->
+        print_s [%message "Game over" (winner : Player.t) (rounds_played : int)];
+        Ok ()
+      | None ->
+        (match Game.current_round game with
+         | None -> Error "No current round"
+         | Some round ->
+           (match play_round round 0 with
+            | Ok round_winner ->
+              let game = Game.apply_round_result game round_winner in
+              let game = Game.next_round_if_possible game in
+              play_game game (rounds_played + 1)
+            | Error msg -> Error msg)))
+  in
+  let game = Game.init ~dice_per_player:5 in
+  (match play_game game 0 with
+   | Ok () -> ()
+   | Error msg -> print_endline ("Error: " ^ msg));
+  [%expect {| ("Game over" (winner Player2) (rounds_played 3)) |}]
 ;;
-
