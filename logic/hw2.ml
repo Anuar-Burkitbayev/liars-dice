@@ -1,190 +1,191 @@
 open! Core
 
-module Player_kind = struct
+module Player = struct
   type t =
-    | X
-    | O
-  [@@deriving sexp, compare, equal]
+    | Player1
+    | Player2
+  [@@deriving sexp, equal, compare]
 
-  (* It's clearer to use type inference and just write:
-     [let opposite t =]
-  *)
-  let opposite (t : t) : t =
-    match t with
-    | X -> O
-    | O -> X
+  let opposite = function
+    | Player1 -> Player2
+    | Player2 -> Player1
   ;;
 end
 
-module Cell_position = struct
-  module T = struct
-    type t =
-      { row : int
-      ; column : int
-      }
-    [@@deriving sexp, compare]
-  end
+module Die = struct
+  type t = int [@@deriving sexp, equal]
 
-  include T
-
-  (* Creates a [Cell_position.Map.t]. *)
-  include Comparable.Make (T)
+  let roll () = Random.int 6 + 1
 end
 
-module Move = Cell_position
+module Hand = struct
+  type t = Die.t list [@@deriving sexp, equal]
 
-module Decision = struct
-  type t =
-    | In_progress of { whose_turn : Player_kind.t }
-    | Winner of Player_kind.t
-    | Stalemate
-  [@@deriving sexp, compare, equal]
-
-  let is_game_over t =
-    match t with
-    | Stalemate | Winner _ -> true
-    | In_progress _ -> false
-  ;;
+  let roll count = List.init count ~f:(fun _ -> Die.roll ())
+  let count_value t value = List.count t ~f:(fun die -> Int.equal die value)
 end
 
-module Game_state = struct
+module Bid = struct
   type t =
-    { board : Player_kind.t Cell_position.Map.t
-    ; rows : int
-    ; columns : int
-    ; winning_sequence_length : int
-    ; decision : Decision.t
-    ; last_move : Move.t option (* For animation purposes. *)
+    { count : int
+    ; value : int
     }
-  [@@deriving sexp, compare, equal]
+  [@@deriving sexp, equal, compare]
 
-  module Create_error = struct
-    type t =
-      | Board_too_big_or_small
-      | Unwinnable_sequence_length
-    [@@deriving sexp, compare]
-  end
+  let is_higher ~previous ~next =
+    match previous with
+    | None -> true
+    | Some prev ->
+      (next.count > prev.count && next.value >= prev.value)
+      || (next.count = prev.count && next.value > prev.value)
+  ;;
+end
 
-  let create ~rows ~columns ~winning_sequence_length : (t, Create_error.t list) Result.t =
-    let size_ok = rows < 20 && columns < 20 && rows > 0 && columns > 0 in
-    let sequence_length_ok =
-      (winning_sequence_length <= rows || winning_sequence_length <= columns)
-      && winning_sequence_length > 0
+module Round = struct
+  type t =
+    { hands : (Player.t * Hand.t) list
+    ; current_player : Player.t
+    ; current_bid : Bid.t option
+    }
+  [@@deriving sexp]
+
+  let init ~p1_dice ~p2_dice =
+    { hands = [ Player.Player1, Hand.roll p1_dice; Player.Player2, Hand.roll p2_dice ]
+    ; current_player = Player.Player1
+    ; current_bid = None
+    }
+  ;;
+
+  let hand_of t player = List.Assoc.find_exn t.hands player ~equal:Player.equal
+
+  let total_count_of_value t value =
+    List.fold t.hands ~init:0 ~f:(fun acc (_, hand) -> acc + Hand.count_value hand value)
+  ;;
+
+  let make_bid t (bid : Bid.t) : t Or_error.t =
+    if not (Bid.is_higher ~previous:t.current_bid ~next:bid)
+    then Or_error.error_string "Bid must be higher than the previous one"
+    else if bid.count < 1
+    then Or_error.error_string "Bid count must be >= 1"
+    else if bid.value < 1 || bid.value > 6
+    then Or_error.error_string "Bid value must be between 1 and 6"
+    else (
+      let next_player = Player.opposite t.current_player in
+      Ok { t with current_player = next_player; current_bid = Some bid })
+  ;;
+
+  let call_liar t =
+    match t.current_bid with
+    | None -> Or_error.error_string "No bid to challenge"
+    | Some bid ->
+      let actual_count = total_count_of_value t bid.value in
+      let prev_player = Player.opposite t.current_player in
+      let winner, message =
+        if actual_count >= bid.count
+        then
+          ( prev_player
+          , sprintf
+              "Not a lie! There %s %d %d%s"
+              (if actual_count = 1 then "is" else "are")
+              actual_count
+              bid.value
+              (if actual_count = 1 then "" else "s") )
+        else
+          ( t.current_player
+          , sprintf
+              "Caught in a lie! There %s only %d %d%s"
+              (if actual_count = 1 then "is" else "are")
+              actual_count
+              bid.value
+              (if actual_count = 1 then "" else "s") )
+      in
+      Ok (winner, message)
+  ;;
+
+  (* Test helper functions *)
+  let get_current_bid t = t.current_bid
+  let get_current_player t = t.current_player
+
+  let create_with_hands ~p1_hand ~p2_hand =
+    { hands = [ Player.Player1, p1_hand; Player.Player2, p2_hand ]
+    ; current_player = Player.Player1
+    ; current_bid = None
+    }
+  ;;
+
+  let get_all_moves t =
+    let valid_bids =
+      let max_dice =
+        List.fold t.hands ~init:0 ~f:(fun acc (_, hand) -> acc + List.length hand)
+      in
+      List.concat_map
+        (List.range 1 (max_dice + 1))
+        ~f:(fun count ->
+          List.map (List.range 1 7) ~f:(fun value ->
+            let bid = { Bid.count; value } in
+            if Bid.is_higher ~previous:t.current_bid ~next:bid
+            then Some (`Bid bid)
+            else None))
+      |> List.filter_opt
     in
-    match size_ok, sequence_length_ok with
-    | true, true ->
-      Ok
-        { board = Cell_position.Map.empty
-        ; winning_sequence_length
-        ; rows
-        ; columns
-        ; decision = In_progress { whose_turn = X }
-        ; last_move = None
-        }
-    | _ ->
-      Error
-        ((if size_ok then [] else [ Create_error.Board_too_big_or_small ])
-         @ if sequence_length_ok then [] else [ Create_error.Unwinnable_sequence_length ]
-        )
+    match t.current_bid with
+    | None -> valid_bids
+    | Some _ -> `CallLiar :: valid_bids
+  ;;
+end
+
+module Game = struct
+  type t =
+    { current_round : Round.t option
+    ; game_winner : Player.t option
+    ; rounds_won : (Player.t * int) list
+    ; dice_per_player : int
+    }
+  [@@deriving sexp]
+
+  let init ~dice_per_player =
+    { current_round = Some (Round.init ~p1_dice:dice_per_player ~p2_dice:dice_per_player)
+    ; game_winner = None
+    ; rounds_won = [ Player.Player1, 0; Player.Player2, 0 ]
+    ; dice_per_player
+    }
   ;;
 
-  let value_if_all_the_same list =
-    match list with
-    | hd :: tl -> if List.for_all tl ~f:(Player_kind.equal hd) then Some hd else None
-    | [] -> None
-  ;;
+  let rounds_won_by t player = List.Assoc.find_exn t.rounds_won player ~equal:Player.equal
 
-  let check_direction_starting_from
-        ~vertical_delta
-        ~horizontal_delta
-        { board; winning_sequence_length; _ }
-        ({ row; column } : Cell_position.t)
-    =
-    let cells =
-      List.range 0 winning_sequence_length
-      |> List.filter_map ~f:(fun i ->
-        Map.find
-          board
-          { row = row + (i * vertical_delta); column = column + (i * horizontal_delta) })
+  let update_rounds_won t winner =
+    let updated_rounds_won =
+      List.map t.rounds_won ~f:(fun (player, wins) ->
+        if Player.equal player winner then player, wins + 1 else player, wins)
     in
-    if List.length cells >= winning_sequence_length
-    then value_if_all_the_same cells
-    else None
+    { t with rounds_won = updated_rounds_won }
   ;;
 
-  let deltas = List.init 3 ~f:(fun i -> i - 1)
-
-  let all_directions =
-    List.cartesian_product deltas deltas
-    |> List.filter ~f:(fun (vertical_delta, horizontal_delta) ->
-      vertical_delta <> 0 || horizontal_delta <> 0)
+  let check_game_winner t =
+    let winner =
+      List.find t.rounds_won ~f:(fun (_, wins) -> wins >= 2) |> Option.map ~f:fst
+    in
+    { t with game_winner = winner }
   ;;
 
-  let check_all_directions t cell_position =
-    all_directions
-    |> List.filter_map ~f:(fun (vertical_delta, horizontal_delta) ->
-      check_direction_starting_from ~vertical_delta ~horizontal_delta t cell_position)
-    |> value_if_all_the_same
+  let apply_round_result t round_winner =
+    let updated_game = update_rounds_won t round_winner in
+    check_game_winner updated_game
   ;;
 
-  (** Checks every position on the board, paired with every one of the eight directions,
-      and walks in that direction the length of a winning sequence. If all the cells it
-      visits are owned by a player, then that player has won.
-
-      Note that this is not an incredibly efficient algorithm, but it is a simple and
-      correct one. One could improve performance and just check all directions around the
-      most recently played position (and sum the sequence lengths of opposite directions).
-
-      Also note that if there are multiple win sequences, this algorithm will pick the
-      first one it finds. This is fine because game play stops when the first win-sequence
-      has been created. *)
-  let check_winner t =
-    Map.filter_keys t.board ~f:(fun cell_position ->
-      check_all_directions t cell_position |> Option.is_some)
-    |> Map.min_elt
-    |> Option.map ~f:snd
+  let start_new_round t =
+    { t with
+      current_round =
+        Some (Round.init ~p1_dice:t.dice_per_player ~p2_dice:t.dice_per_player)
+    }
   ;;
 
-  let is_legal_cell_position { rows; columns; _ } ({ row; column } : Cell_position.t) =
-    0 <= row && 0 <= column && row < rows && column < columns
+  let next_round_if_possible t =
+    match t.game_winner with
+    | Some _ -> t (* Game is over *)
+    | None -> start_new_round t
   ;;
 
-  module Move_error = struct
-    type t =
-      | Game_is_over
-      | Space_already_filled
-      | Illegal_cell_position
-    [@@deriving sexp, compare]
-  end
-
-  let get_all_moves t : Move.t list =
-    let rows = List.range 0 t.rows in
-    let columns = List.range 0 t.columns in
-    List.cartesian_product rows columns
-    |> List.map ~f:(fun (row, column) : Move.t -> { row; column })
-  ;;
-
-  let make_move t (cell_position : Move.t) : (t, Move_error.t) Result.t =
-    match t.decision with
-    | _ when not (is_legal_cell_position t cell_position) -> Error Illegal_cell_position
-    | Winner _ | Stalemate -> Error Game_is_over
-    | In_progress { whose_turn } ->
-      (match Map.find t.board cell_position with
-       | Some _ -> Error Space_already_filled
-       | None ->
-         let board = Map.set t.board ~key:cell_position ~data:whose_turn in
-         let decision : Decision.t =
-           match check_winner { t with board } with
-           | Some player_kind -> Winner player_kind
-           | None ->
-             if Map.length board >= t.columns * t.rows
-             then Stalemate
-             else In_progress { whose_turn = Player_kind.opposite whose_turn }
-         in
-         Ok { t with board; decision; last_move = Some cell_position })
-  ;;
-
-  module For_testing = struct
-    let all_directions = all_directions
-  end
+  let get_winner t = t.game_winner
+  let current_round t = t.current_round
 end

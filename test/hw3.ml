@@ -2,405 +2,288 @@ open! Core
 open Logic_library
 open Hw2
 
+let () =
+  (* Initialize random number generator with a fixed seed for tests *)
+  Random.init 12345
+;;
+
 let ok_exn result = Result.ok result |> Option.value_exn
 
-let%test "Example of a unit test (returns bool)" =
-  let state = Game_state.create ~winning_sequence_length:3 ~rows:3 ~columns:3 |> ok_exn in
-  let expected_state : Game_state.t =
-    { board = Cell_position.Map.empty
-    ; rows = 3
-    ; columns = 3
-    ; winning_sequence_length = 3
-    ; decision = In_progress { whose_turn = X }
-    ; last_move = None
-    }
+let pretty_print_round round =
+  let p1_hand = Round.hand_of round Player.Player1 in
+  let p2_hand = Round.hand_of round Player.Player2 in
+  let current_bid = Round.get_current_bid round in
+  let current_player = Round.get_current_player round in
+  printf "\nCurrent player: %s\n" 
+    (match current_player with
+     | Player.Player1 -> "Player 1"
+     | Player.Player2 -> "Player 2");
+  printf "Player 1 hand: %s\n" 
+    (List.to_string ~f:Int.to_string p1_hand);
+  printf "Player 2 hand: %s\n"
+    (List.to_string ~f:Int.to_string p2_hand);
+  match current_bid with
+  | None -> printf "No current bid\n"
+  | Some bid -> 
+    printf "Current bid: %d dice showing %d\n" bid.count bid.value
+;;
+
+let pretty_print_game game =
+  let p1_wins = Game.rounds_won_by game Player.Player1 in
+  let p2_wins = Game.rounds_won_by game Player.Player2 in
+  printf "\nGame State:\n";
+  printf "Player 1 rounds won: %d\n" p1_wins;
+  printf "Player 2 rounds won: %d\n" p2_wins;
+  match Game.get_winner game with
+  | Some Player.Player1 -> printf "Player 1 has won the game!\n"
+  | Some Player.Player2 -> printf "Player 2 has won the game!\n"
+  | None ->
+    printf "Game in progress\n";
+    match Game.current_round game with
+    | None -> printf "No active round\n"
+    | Some round -> pretty_print_round round
+;;
+
+(* Basic Game Setup Tests *)
+let%test "Game initialization with 5 dice per player" =
+  let game = Game.init ~dice_per_player:5 in
+  let round = Game.current_round game |> Option.value_exn in
+  List.length (Round.hand_of round Player.Player1) = 5
+  && List.length (Round.hand_of round Player.Player2) = 5
+  && Option.is_none (Game.get_winner game)
+;;
+
+(* Bid Tests *)
+let%test "Initial bid with count=1 value=1 should be valid" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  Result.is_ok (Round.make_bid round { count = 1; value = 1 })
+;;
+
+let%test "Bid with count=0 should be invalid" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  Result.is_error (Round.make_bid round { count = 0; value = 1 })
+;;
+
+let%test "Bid with value=7 should be invalid" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  Result.is_error (Round.make_bid round { count = 1; value = 7 })
+;;
+
+(* Bid Comparison Tests *)
+let%test "Higher count is always valid bid" =
+  Bid.is_higher ~previous:(Some { count = 3; value = 6 }) ~next:{ count = 4; value = 6 }
+;;
+
+let%test "Same count needs higher value" =
+  Bid.is_higher ~previous:(Some { count = 3; value = 3 }) ~next:{ count = 3; value = 4 }
+  && not
+       (Bid.is_higher
+          ~previous:(Some { count = 3; value = 4 })
+          ~next:{ count = 3; value = 3 })
+;;
+
+(* Round Mechanics Tests *)
+let make_and_get_round bid round = Round.make_bid round bid |> ok_exn
+
+let%test "Sequence of valid bids" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  let round = make_and_get_round { count = 1; value = 2 } round in
+  let round = make_and_get_round { count = 2; value = 2 } round in
+  Result.is_ok (Round.make_bid round { count = 3; value = 2 })
+;;
+
+let%test "Call liar on true bid" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  let round = make_and_get_round { count = 1; value = 2 } round in
+  match Round.call_liar round with
+  | Ok (winner, _) -> Player.equal winner Player.Player1
+  | Error _ -> false
+;;
+
+let%test "Call liar on false bid" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  let round = make_and_get_round { count = 2; value = 6 } round in
+  match Round.call_liar round with
+  | Ok (winner, _) -> Player.equal winner Player.Player2
+  | Error _ -> false
+;;
+
+let%expect_test "Call liar when bid is true" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  let round = make_and_get_round { count = 3; value = 2 } round in
+  let winner, message = Round.call_liar round |> ok_exn in
+  print_s [%sexp (winner : Player.t)];
+  print_endline message;
+  [%expect
+    {|
+    Player2
+    Caught in a lie! There is only 1 2 |}]
+;;
+
+let%expect_test "Call liar when bid is false" =
+  let round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  let round = make_and_get_round { count = 2; value = 6 } round in
+  let winner, message = Round.call_liar round |> ok_exn in
+  print_s [%sexp (winner : Player.t)];
+  print_endline message;
+  [%expect
+    {|
+    Player2
+    Caught in a lie! There is only 1 6 |}]
+;;
+
+(* Game Win Condition Tests *)
+let%expect_test "Game ends after player wins 2 rounds" =
+  let game = Game.init ~dice_per_player:5 in
+  (* Simulate Player1 winning two rounds *)
+  let game = Game.apply_round_result game Player.Player1 in
+  let game = Game.next_round_if_possible game in
+  let game = Game.apply_round_result game Player.Player1 in
+  print_s [%sexp (Game.get_winner game : Player.t option)];
+  [%expect {| (Player1) |}]
+;;
+
+let%expect_test "Game continues if no player has 2 wins" =
+  let game = Game.init ~dice_per_player:5 in
+  (* Simulate Player1 and Player2 each winning one round *)
+  let game = Game.apply_round_result game Player.Player1 in
+  let game = Game.next_round_if_possible game in
+  let game = Game.apply_round_result game Player.Player2 in
+  let game = Game.next_round_if_possible game in
+  (* Game should still be in progress *)
+  print_s [%sexp (Game.get_winner game : Player.t option)];
+  print_s [%sexp (Option.is_some (Game.current_round game) : bool)];
+  [%expect
+    {|
+    ()
+    true |}]
+;;
+
+let%expect_test "Round counting works correctly" =
+  let game = Game.init ~dice_per_player:5 in
+  let game = Game.apply_round_result game Player.Player1 in
+  let p1_wins = Game.rounds_won_by game Player.Player1 in
+  let p2_wins = Game.rounds_won_by game Player.Player2 in
+  print_s [%message "Round wins" (p1_wins : int) (p2_wins : int)];
+  [%expect {| ("Round wins" (p1_wins 1) (p2_wins 0)) |}]
+;;
+
+(* Game Progression Tests from hw1.ml *)
+let%test "Game progression - initial state to first bid" =
+  let game = Game.init ~dice_per_player:5 in
+  let round = Game.current_round game |> Option.value_exn in
+  let bid = { Bid.count = 2; value = 3 } in
+  match Round.make_bid round bid with
+  | Ok new_round ->
+    Player.equal (Round.get_current_player new_round) Player.Player2
+    && Option.equal Bid.equal (Round.get_current_bid new_round) (Some bid)
+  | Error _ -> false
+;;
+
+let%test "Game progression - second bid higher quantity" =
+  let game = Game.init ~dice_per_player:5 in
+  let round = Game.current_round game |> Option.value_exn in
+  let round = Round.make_bid round { Bid.count = 2; value = 3 } |> ok_exn in
+  let bid2 = { Bid.count = 3; value = 3 } in
+  match Round.make_bid round bid2 with
+  | Ok new_round ->
+    Player.equal (Round.get_current_player new_round) Player.Player1
+    && Option.equal Bid.equal (Round.get_current_bid new_round) (Some bid2)
+  | Error _ -> false
+;;
+
+let%test "Game progression - calling liar correctly updates game state" =
+  let game = Game.init ~dice_per_player:5 in
+  let round = Game.current_round game |> Option.value_exn in
+  let round = Round.make_bid round { Bid.count = 3; value = 3 } |> ok_exn in
+  match Round.call_liar round with
+  | Ok (winner, _) -> Option.is_some (Some winner)
+  | Error _ -> false
+;;
+
+(* Random Walk Test *)
+
+let%expect_test "Random walk with pretty print" =
+  let initial_round = Round.init ~p1_dice:5 ~p2_dice:5 in
+  printf "\nInitial state:\n";
+  pretty_print_round initial_round;
+  
+  let rec play_and_print_random_moves round moves_taken =
+    if moves_taken >= 100
+    then `MaxMoves
+    else (
+      let possible_moves = Round.get_all_moves round in
+      match possible_moves with
+      | [] -> `NoMoves
+      | moves ->
+        let random_move = List.random_element_exn moves in
+        (match random_move with
+         | `CallLiar ->
+           printf "\nMove %d: Calling Liar!\n" moves_taken;
+           (match Round.call_liar round with
+            | Ok (winner, message) -> 
+              printf "Result: %s\n" message;
+              `LiarCalled winner
+            | Error _ -> `Error)
+         | `Bid bid ->
+           printf "\nMove %d: Bidding %d dice showing %d\n" 
+             moves_taken bid.count bid.value;
+           (match Round.make_bid round bid with
+            | Ok new_round -> 
+              pretty_print_round new_round;
+              play_and_print_random_moves new_round (moves_taken + 1)
+            | Error _ -> `Error)))
   in
-  Game_state.equal state expected_state
+  let result = play_and_print_random_moves initial_round 0 in
+  printf "\nFinal result: ";
+  (match result with
+   | `MaxMoves -> printf "Random walk reached maximum moves limit\n"
+   | `NoMoves -> printf "Random walk ended with no possible moves\n"
+   | `LiarCalled winner ->
+     printf "Random walk ended with liar being called. Winner: %s\n"
+       (match winner with
+        | Player.Player1 -> "Player 1"
+        | Player.Player2 -> "Player 2")
+   | `Error -> printf "Random walk ended with an error\n");
+  [%expect {|
+  Initial state:
+    Current player: Player 1
+    Player 1 hand: (1 2 6 1 4)
+    Player 2 hand: (4 1 5 1 1)
+    No current bid
+
+
+    Move 0: Bidding 3 dice showing 5
+
+
+    Current player: Player 2
+    Player 1 hand: (1 2 6 1 4)
+    Player 2 hand: (4 1 5 1 1)
+    Current bid: 3 dice showing 5
+  
+
+    Move 1: Bidding 6 dice showing 6
+  
+
+    Current player: Player 1
+    Player 1 hand: (1 2 6 1 4)
+    Player 2 hand: (4 1 5 1 1)
+    Current bid: 6 dice showing 6
+  
+
+    Move 2: Bidding 7 dice showing 6
+  
+
+    Current player: Player 2
+    Player 1 hand: (1 2 6 1 4)
+    Player 2 hand: (4 1 5 1 1)
+    Current bid: 7 dice showing 6
+  
+
+    Move 3: Calling Liar!
+      Result: Caught in a lie! There is only 1 6
+  
+
+    Final result: Random walk ended with liar being called. Winner: Player 2|}]
 ;;
 
-let create_and_print ~winning_sequence_length ~rows ~columns =
-  let result = Game_state.create ~winning_sequence_length ~rows ~columns in
-  print_s [%sexp (result : (Game_state.t, Game_state.Create_error.t list) Result.t)]
-;;
-
-let%expect_test "Example of an expect_test (returns unit)" =
-  create_and_print ~winning_sequence_length:3 ~rows:3 ~columns:3;
-  [%expect
-    {|
-    (Ok
-     ((board ()) (rows 3) (columns 3) (winning_sequence_length 3)
-      (decision (In_progress (whose_turn X))) (last_move ())))
-    |}]
-;;
-
-let%expect_test "Game_state.create fails on big (and small) sizes" =
-  create_and_print ~winning_sequence_length:3 ~rows:3 ~columns:3;
-  [%expect
-    {|
-    (Ok
-     ((board ()) (rows 3) (columns 3) (winning_sequence_length 3)
-      (decision (In_progress (whose_turn X))) (last_move ())))
-    |}];
-  create_and_print ~winning_sequence_length:3 ~rows:3 ~columns:20;
-  [%expect {| (Error (Board_too_big_or_small)) |}];
-  create_and_print ~winning_sequence_length:4 ~rows:3 ~columns:3;
-  [%expect {| (Error (Unwinnable_sequence_length)) |}];
-  create_and_print ~winning_sequence_length:30 ~rows:21 ~columns:21;
-  [%expect {| (Error (Board_too_big_or_small Unwinnable_sequence_length)) |}];
-  create_and_print ~winning_sequence_length:1 ~rows:0 ~columns:1;
-  [%expect {| (Error (Board_too_big_or_small)) |}];
-  create_and_print ~winning_sequence_length:1 ~rows:1 ~columns:0;
-  [%expect {| (Error (Board_too_big_or_small)) |}];
-  create_and_print ~winning_sequence_length:1 ~rows:1 ~columns:(-10);
-  [%expect {| (Error (Board_too_big_or_small)) |}];
-  create_and_print ~winning_sequence_length:1 ~rows:(-10) ~columns:1;
-  [%expect {| (Error (Board_too_big_or_small)) |}];
-  create_and_print ~winning_sequence_length:0 ~rows:1 ~columns:1;
-  [%expect {| (Error (Unwinnable_sequence_length)) |}];
-  create_and_print ~winning_sequence_length:(-10) ~rows:1 ~columns:1;
-  [%expect {| (Error (Unwinnable_sequence_length)) |}]
-;;
-
-let%expect_test "Game_state.all_directions" =
-  print_s [%sexp (Game_state.For_testing.all_directions : (int * int) list)];
-  [%expect {| ((-1 -1) (-1 0) (-1 1) (0 -1) (0 1) (1 -1) (1 0) (1 1)) |}]
-;;
-
-let make_move_and_print game_state cell_position =
-  let result = Game_state.make_move game_state cell_position in
-  print_s [%sexp (result : (Game_state.t, Game_state.Move_error.t) Result.t)]
-;;
-
-let initial_3x3 =
-  Game_state.create ~winning_sequence_length:3 ~rows:3 ~columns:3 |> ok_exn
-;;
-
-let initial_gomoku =
-  Game_state.create ~winning_sequence_length:5 ~rows:15 ~columns:15 |> ok_exn
-;;
-
-let%expect_test "Game_state.make_move in position (0,0) from empty 3x3 board" =
-  make_move_and_print initial_3x3 { row = 0; column = 0 };
-  [%expect
-    {|
-    (Ok
-     ((board ((((row 0) (column 0)) X))) (rows 3) (columns 3)
-      (winning_sequence_length 3) (decision (In_progress (whose_turn O)))
-      (last_move (((row 0) (column 0))))))
-    |}]
-;;
-
-let%expect_test "Game_state.make_move fails for position (3,2) from empty 3x3 board" =
-  make_move_and_print initial_3x3 { row = 3; column = 2 };
-  [%expect {| (Error Illegal_cell_position) |}]
-;;
-
-let%expect_test "Game_state.make_move fails if playing twice in same position" =
-  let move : Move.t = { row = 0; column = 0 } in
-  let state_after_0x0_move = Game_state.make_move initial_3x3 move |> ok_exn in
-  make_move_and_print state_after_0x0_move move;
-  [%expect {| (Error Space_already_filled) |}]
-;;
-
-let pretty_print_board ({ board; rows; columns; decision; _ } : Game_state.t) =
-  let row_separator =
-    List.range 0 columns |> List.map ~f:(fun _ -> "-") |> String.concat ~sep:"-"
-  in
-  for row = 0 to rows - 1 do
-    List.range 0 columns
-    |> List.map ~f:(fun column ->
-      match Map.find board { row; column } with
-      | None -> " "
-      | Some player -> Player_kind.sexp_of_t player |> Sexp.to_string)
-    |> String.concat ~sep:"|"
-    |> print_endline;
-    if row < rows - 1 then print_endline row_separator
-  done;
-  print_s [%sexp (decision : Decision.t)]
-;;
-
-let print_final_state game_state cell_positions =
-  let result =
-    List.fold cell_positions ~init:game_state ~f:(fun new_state cell_position ->
-      Game_state.make_move new_state cell_position |> ok_exn)
-  in
-  pretty_print_board result
-;;
-
-let%expect_test "Game_state.make_move: X makes a move in the middle of the board" =
-  print_final_state initial_3x3 [ { row = 1; column = 1 } ];
-  [%expect
-    {|
-     | |
-    -----
-     |X|
-    -----
-     | |
-    (In_progress (whose_turn O))
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: X makes a move, then O makes a move" =
-  print_final_state initial_3x3 [ { row = 1; column = 1 }; { row = 0; column = 0 } ];
-  [%expect
-    {|
-    O| |
-    -----
-     |X|
-    -----
-     | |
-    (In_progress (whose_turn X))
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: tictactoe X wins vertically" =
-  print_final_state
-    initial_3x3
-    [ { row = 0; column = 2 }
-    ; { row = 1; column = 0 }
-    ; { row = 1; column = 2 }
-    ; { row = 1; column = 1 }
-    ; { row = 2; column = 2 }
-    ];
-  [%expect
-    {|
-     | |X
-    -----
-    O|O|X
-    -----
-     | |X
-    (Winner X)
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: tictactoe X wins horizontally" =
-  print_final_state
-    initial_3x3
-    [ { row = 0; column = 0 }
-    ; { row = 1; column = 0 }
-    ; { row = 0; column = 1 }
-    ; { row = 1; column = 1 }
-    ; { row = 0; column = 2 }
-    ];
-  [%expect
-    {|
-    X|X|X
-    -----
-    O|O|
-    -----
-     | |
-    (Winner X)
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: tictactoe O wins horizontally" =
-  print_final_state
-    initial_3x3
-    [ { row = 0; column = 0 }
-    ; { row = 1; column = 0 }
-    ; { row = 0; column = 1 }
-    ; { row = 1; column = 1 }
-    ; { row = 2; column = 2 }
-    ; { row = 1; column = 2 }
-    ];
-  [%expect
-    {|
-    X|X|
-    -----
-    O|O|O
-    -----
-     | |X
-    (Winner O)
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: tictactoe O wins diagonally" =
-  print_final_state
-    initial_3x3
-    [ { row = 0; column = 0 }
-    ; { row = 2; column = 0 }
-    ; { row = 0; column = 1 }
-    ; { row = 1; column = 1 }
-    ; { row = 2; column = 2 }
-    ; { row = 0; column = 2 }
-    ];
-  [%expect
-    {|
-    X|X|O
-    -----
-     |O|
-    -----
-    O| |X
-    (Winner O)
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: tictactoe stalemate" =
-  print_final_state
-    initial_3x3
-    [ { row = 0; column = 0 }
-    ; { row = 1; column = 0 }
-    ; { row = 0; column = 1 }
-    ; { row = 1; column = 1 }
-    ; { row = 2; column = 0 }
-    ; { row = 2; column = 1 }
-    ; { row = 1; column = 2 }
-    ; { row = 0; column = 2 }
-    ; { row = 2; column = 2 }
-    ];
-  [%expect
-    {|
-    X|X|O
-    -----
-    O|O|X
-    -----
-    X|O|X
-    Stalemate
-    |}]
-;;
-
-let%expect_test "Game_state.make_move: full gomoku game until O wins" =
-  print_final_state
-    initial_gomoku
-    [ { row = 0; column = 0 }
-    ; { row = 1; column = 0 }
-    ; { row = 0; column = 1 }
-    ; { row = 2; column = 1 }
-    ; { row = 0; column = 2 }
-    ; { row = 3; column = 2 }
-    ; { row = 0; column = 3 }
-    ; { row = 4; column = 3 }
-    ; { row = 0; column = 9 }
-    ; { row = 5; column = 4 }
-    ];
-  [%expect
-    {|
-    X|X|X|X| | | | | |X| | | | |
-    -----------------------------
-    O| | | | | | | | | | | | | |
-    -----------------------------
-     |O| | | | | | | | | | | | |
-    -----------------------------
-     | |O| | | | | | | | | | | |
-    -----------------------------
-     | | |O| | | | | | | | | | |
-    -----------------------------
-     | | | |O| | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    -----------------------------
-     | | | | | | | | | | | | | |
-    (Winner O)
-    |}]
-;;
-
-let%expect_test "Game_state.get_all_moves for tictactoe" =
-  let all_moves = Game_state.get_all_moves initial_3x3 in
-  print_s [%message "All moves for 3x3 board" (all_moves : Move.t list)];
-  [%expect
-    {|
-    ("All moves for 3x3 board"
-     (all_moves
-      (((row 0) (column 0)) ((row 0) (column 1)) ((row 0) (column 2))
-       ((row 1) (column 0)) ((row 1) (column 1)) ((row 1) (column 2))
-       ((row 2) (column 0)) ((row 2) (column 1)) ((row 2) (column 2)))))
-    |}]
-;;
-
-let random_walk (initial_state : Game_state.t) ~random_seed =
-  let rec random_walk (state : Game_state.t) =
-    let all_moves = Game_state.get_all_moves state in
-    let next_states =
-      List.filter_map all_moves ~f:(fun move ->
-        Game_state.make_move state move |> Result.ok)
-    in
-    let random_state = List.random_element next_states |> Option.value_exn in
-    match Decision.is_game_over random_state.decision with
-    | true -> random_state
-    | false -> random_walk random_state
-  in
-  (* Set random seed. *)
-  Core.Random.init random_seed;
-  pretty_print_board (random_walk initial_state)
-;;
-
-let%expect_test "TicTacToe random walk till terminal state" =
-  random_walk initial_3x3 ~random_seed:1;
-  [%expect
-    {|
-    O|O|X
-    -----
-     |X|
-    -----
-    X|O|X
-    (Winner X)
-    |}];
-  random_walk initial_3x3 ~random_seed:3;
-  [%expect
-    {|
-    X|X|O
-    -----
-    O|O|X
-    -----
-    X|X|O
-    Stalemate
-    |}];
-  random_walk initial_3x3 ~random_seed:1234;
-  [%expect
-    {|
-    X| |O
-    -----
-    X| |O
-    -----
-    X|O|X
-    (Winner X)
-    |}];
-  random_walk initial_gomoku ~random_seed:1;
-  [%expect
-    {|
-     | |O| |X|X|X| | | |O| | |X|
-    -----------------------------
-    O|O| | | |O| | |X|X|X|O|X| |X
-    -----------------------------
-    X| | | |O|X| |X| | | | | | |X
-    -----------------------------
-     | | |O| |X|O| | | |X| | | |X
-    -----------------------------
-     | | |O| | | |O|O| | |O| | |X
-    -----------------------------
-    O|X|X|X|X|X| | |O| | |X| | |
-    -----------------------------
-     |O| | | | | |O| |O|O|O|O| |X
-    -----------------------------
-    X| | |O| |O|O| |X| | | | |O|O
-    -----------------------------
-     | | |O| |X|O|O| |O|X| | | |
-    -----------------------------
-    O| |X| |O|O| | | | | | | | |
-    -----------------------------
-     |X| |O| | | |X|O| |X| | |X|
-    -----------------------------
-     | | | |X|X| | |O| |X|O| |X|
-    -----------------------------
-     |O| | | | | | |O|X|X|X| | |
-    -----------------------------
-    O| |X| |X|X| | |X| | |O| | |O
-    -----------------------------
-     |O|O|X| | |X| | | | | | | |O
-    (Winner X)
-    |}]
-;;

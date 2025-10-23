@@ -1,73 +1,63 @@
 open! Core
 
-module Player_kind : sig
+module Player : sig
   type t =
-    | X
-    | O
-  [@@deriving sexp, compare, equal]
+    | Player1
+    | Player2
+  [@@deriving sexp, equal, compare]
 
   val opposite : t -> t
 end
 
-module Cell_position : sig
-  type t =
-    { row : int
-    ; column : int
-    }
-  [@@deriving sexp, compare]
+module Die : sig
+  type t = int [@@deriving sexp, equal]
 
-  (* Defines a [Cell_position.Map.t]. *)
-  include Comparable.S with type t := t
+  val roll : unit -> t
 end
 
-module Move : module type of Cell_position
+module Hand : sig
+  type t = Die.t list [@@deriving sexp, equal]
 
-module Decision : sig
-  type t =
-    | In_progress of { whose_turn : Player_kind.t }
-    | Winner of Player_kind.t
-    | Stalemate
-  [@@deriving sexp, compare, equal]
-
-  val is_game_over : t -> bool
+  val roll : int -> t
+  val count_value : t -> int -> int
 end
 
-module Game_state : sig
+module Bid : sig
   type t =
-    { board : Player_kind.t Cell_position.Map.t
-    ; rows : int
-    ; columns : int
-    ; winning_sequence_length : int
-    ; decision : Decision.t
-    ; last_move : Move.t option (* For animation purposes. *)
+    { count : int
+    ; value : int
     }
-  [@@deriving sexp, compare, equal]
+  [@@deriving sexp, equal, compare]
 
-  module Create_error : sig
-    type t =
-      | Board_too_big_or_small
-      | Unwinnable_sequence_length
-    [@@deriving sexp, compare]
-  end
+  val is_higher : previous:t option -> next:t -> bool
+end
 
-  val create
-    :  rows:int
-    -> columns:int
-    -> winning_sequence_length:int
-    -> (t, Create_error.t list) Result.t
+module Round : sig
+  type t [@@deriving sexp]
 
-  module Move_error : sig
-    type t =
-      | Game_is_over
-      | Space_already_filled
-      | Illegal_cell_position
-    [@@deriving sexp, compare]
-  end
+  val init : p1_dice:int -> p2_dice:int -> t
+  val hand_of : t -> Player.t -> Hand.t
+  val total_count_of_value : t -> int -> int
+  val make_bid : t -> Bid.t -> t Or_error.t
+  val call_liar : t -> (Player.t * string) Or_error.t
 
-  val get_all_moves : t -> Move.t list
-  val make_move : t -> Move.t -> (t, Move_error.t) Result.t
+  (* Test helper functions *)
+  val get_current_bid : t -> Bid.t option
+  val get_current_player : t -> Player.t
+  val create_with_hands : p1_hand:Hand.t -> p2_hand:Hand.t -> t
+  val get_all_moves : t -> [ `Bid of Bid.t | `CallLiar ] list
+end
 
-  module For_testing : sig
-    val all_directions : (int * int) list
-  end
+module Game : sig
+  type t [@@deriving sexp]
+
+  val init : dice_per_player:int -> t
+  val rounds_won_by : t -> Player.t -> int
+  val update_rounds_won : t -> Player.t -> t
+  val check_game_winner : t -> t
+  val apply_round_result : t -> Player.t -> t
+  val start_new_round : t -> t
+  val next_round_if_possible : t -> t
+  val get_winner : t -> Player.t option
+  val current_round : t -> Round.t option
 end
