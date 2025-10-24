@@ -327,7 +327,6 @@ let component =
 
 (* Start the app *)
 let () =
-  (* Initialize randomness for dice rolls in JS runtime *)
   Random.self_init ();
   Bonsai_web.Start.start ~bind_to_element_with_id:"app" component
 ;;
