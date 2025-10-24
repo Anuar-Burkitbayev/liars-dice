@@ -53,7 +53,9 @@ let play_multiple_games ~ai1 ~ai2 ~num_games ~dice_per_player =
   player1_wins, player2_wins
 ;;
 
-let%expect_test "Random AI vs Logical AI - 50 games" =
+(* Random AI vs Logical AI -- Logical should win most games *)
+
+let%expect_test "Random AI vs Logical AI - 10000 games" =
   Random.init 1;
   let player1_wins, player2_wins =
     play_multiple_games
@@ -69,5 +71,45 @@ let%expect_test "Random AI vs Logical AI - 50 games" =
     {|
     Random AI (Player 1) wins: 6
     Logical AI (Player 2) wins: 9994
+    Total games: 10000 |}]
+;;
+
+(* Putting the AIs against themselves -- same AI matchups should result in close outcomes *)
+
+let%expect_test "Random AI vs Random AI - 10000 games" =
+  Random.init 1;
+  let player1_wins, player2_wins =
+    play_multiple_games
+      ~ai1:get_random_move
+      ~ai2:get_random_move
+      ~num_games:10000
+      ~dice_per_player:5
+  in
+  printf "Random AI (Player 1) wins: %d\n" player1_wins;
+  printf "Random AI (Player 2) wins: %d\n" player2_wins;
+  printf "Total games: %d\n" (player1_wins + player2_wins);
+  [%expect
+    {|
+    Random AI (Player 1) wins: 4930
+    Random AI (Player 2) wins: 5070
+    Total games: 10000 |}]
+;;
+
+let%expect_test "Logical AI vs Logical AI - 10000 games" =
+  Random.init 1;
+  let player1_wins, player2_wins =
+    play_multiple_games
+      ~ai1:get_logical_move
+      ~ai2:get_logical_move
+      ~num_games:10000
+      ~dice_per_player:5
+  in
+  printf "Logical AI (Player 1) wins: %d\n" player1_wins;
+  printf "Logical AI (Player 2) wins: %d\n" player2_wins;
+  printf "Total games: %d\n" (player1_wins + player2_wins);
+  [%expect
+    {|
+    Logical AI (Player 1) wins: 5732
+    Logical AI (Player 2) wins: 4268
     Total games: 10000 |}]
 ;;
