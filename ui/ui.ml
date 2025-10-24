@@ -308,8 +308,7 @@ let component =
              ; Attr.class_ "system-message"
              ; overlay_dismiss_handler
              ]
-           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text ("🏆 " ^ msg) ]
-           ]
+           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
        | _, Some winner ->
          let msg =
            if Player.equal winner Player.Player1
@@ -322,8 +321,7 @@ let component =
              ; Attr.class_ "system-message"
              ; overlay_dismiss_handler
              ]
-           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text ("🎉 " ^ msg) ]
-           ])
+           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ])
     ]
 ;;
 
