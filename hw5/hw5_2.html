@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liar's Dice - Waiting on Oponent</title>
+    <link rel="stylesheet" href="hw5.css">
+</head>
+<body>
+    <div class="game-container">
+        <!-- Opponent's Hand (Top) -->
+        <div class="hand opponent-hand">
+            <div class="player-label">Opponent (Player 2)</div>
+            <div class="dice-container">
+                <div class="die hidden">?</div>
+                <div class="die hidden">?</div>
+                <div class="die hidden">?</div>
+                <div class="die hidden">?</div>
+                <div class="die hidden">?</div>
+            </div>
+        </div>
+
+    <div class="game-info">
+        <h1>Liar's Dice</h1>
+
+        <div class="scoreboard">
+            <span class="score player1-score">Player 1: 0</span>
+            <span class="score player2-score">Player 2: 0</span>
+        </div>
+
+        <p id="turn-info">Player 2's Turn</p>
+        <p id="bid-info">2 3s</p>
+    </div>
+
+    <!-- Player's Hand (Bottom) -->
+    <div class="hand player-hand">
+        <div class="dice-container">
+            <div class="die" data-face="1"><span class="face">⚀</span></div>
+            <div class="die" data-face="3"><span class="face">⚂</span></div>
+            <div class="die" data-face="4"><span class="face">⚃</span></div>
+            <div class="die" data-face="6"><span class="face">⚅</span></div>
+            <div class="die" data-face="2"><span class="face">⚁</span></div>
+        </div>
+        <div class="player-label">You (Player 1)</div>
+
+        <!-- Action Buttons --> 
+        <div class="action-bar"> 
+            <button class="btn make-bid" disabled>Make Bid</button> 
+            <button class="btn call-liar" disabled>Call Liar</button> 
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
