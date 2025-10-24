@@ -4,9 +4,9 @@ open Hw2
 open Hw4
 open Virtual_dom
 open! Bonsai.Let_syntax
-module Node = Virtual_dom.Vdom.Node
-module Attr = Virtual_dom.Vdom.Attr
-module Effect = Virtual_dom.Vdom.Effect
+module Node = Vdom.Node
+module Attr = Vdom.Attr
+module Effect = Vdom.Effect
 
 (* Helper function to get dice face Unicode *)
 let dice_face value =
@@ -51,11 +51,6 @@ let model_init () : model =
   }
 ;;
 
-let player_to_string = function
-  | Player.Player1 -> "Player 1"
-  | Player.Player2 -> "Player 2"
-;;
-
 let bid_to_string = function
   | None -> "No bid yet"
   | Some (bid : Bid.t) -> sprintf "%d %ds" bid.count bid.value
@@ -70,7 +65,7 @@ let run_ai_until_human (m : model) : model =
       (match Round.get_current_player round with
        | Player.Player1 -> m
        | Player.Player2 ->
-         (match Hw4.get_logical_move round with
+         (match get_logical_move round with
           | `Bid b ->
             (match Round.make_bid round b with
              | Ok new_round -> loop { m with round = Some new_round }
