@@ -53,7 +53,7 @@ let get_logical_move (round : Round.t) : [ `Bid of Bid.t | `CallLiar ] =
       in
       match safe_bids with
       | [] ->
-        (* No safe bids, make the smallest valid bid *)
+        (* No safe bids, make  valid bid *)
         (match List.hd bid_moves with
          | Some b -> `Bid b
          | None -> `CallLiar)
