@@ -62,12 +62,15 @@ module Round = struct
   ;;
 
   let make_bid t (bid : Bid.t) : t Or_error.t =
-    if not (Bid.is_higher ~previous:t.current_bid ~next:bid)
-    then Or_error.error_string "Bid must be higher than the previous one"
-    else if bid.count < 1
-    then Or_error.error_string "Bid count must be >= 1"
+    if
+      bid.count < 1
+      || bid.count
+         > List.fold t.hands ~init:0 ~f:(fun acc (_, hand) -> acc + List.length hand)
+    then Or_error.error_string "Bid count must be between 1 and the total number of dice"
     else if bid.value < 1 || bid.value > 6
     then Or_error.error_string "Bid value must be between 1 and 6"
+    else if not (Bid.is_higher ~previous:t.current_bid ~next:bid)
+    then Or_error.error_string "Bid must be higher than the previous bid"
     else (
       let next_player = Player.opposite t.current_player in
       Ok { t with current_player = next_player; current_bid = Some bid })
@@ -101,17 +104,6 @@ module Round = struct
       Ok (winner, message)
   ;;
 
-  (* Test helper functions *)
-  let get_current_bid t = t.current_bid
-  let get_current_player t = t.current_player
-
-  let create_with_hands ~p1_hand ~p2_hand =
-    { hands = [ Player.Player1, p1_hand; Player.Player2, p2_hand ]
-    ; current_player = Player.Player1
-    ; current_bid = None
-    }
-  ;;
-
   let get_all_moves t =
     let valid_bids =
       let max_dice =
@@ -130,6 +122,17 @@ module Round = struct
     match t.current_bid with
     | None -> valid_bids
     | Some _ -> `CallLiar :: valid_bids
+  ;;
+
+  (* Test helper functions *)
+  let get_current_bid t = t.current_bid
+  let get_current_player t = t.current_player
+
+  let create_with_hands ~p1_hand ~p2_hand =
+    { hands = [ Player.Player1, p1_hand; Player.Player2, p2_hand ]
+    ; current_player = Player.Player1
+    ; current_bid = None
+    }
   ;;
 end
 
