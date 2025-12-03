@@ -38,5 +38,5 @@ To update the javascript:
 ```shell
 cp _build/default/ui/ui.bc.js generated_js/
 ```
-Then commit the changes and surf to your github.io to see you site:
+Then commit the changes and surf to your github.io to see your site:
 https://Anuar-Burkitbayev.github.io/liars-dice/
