@@ -33,7 +33,12 @@ module Bid : sig
 end
 
 module Round : sig
-  type t [@@deriving sexp]
+  type t =
+    { hands : (Player.t * Hand.t) list
+    ; current_player : Player.t
+    ; current_bid : Bid.t option
+    }
+  [@@deriving sexp]
 
   val init : p1_dice:int -> p2_dice:int -> t
   val hand_of : t -> Player.t -> Hand.t
@@ -49,7 +54,13 @@ module Round : sig
 end
 
 module Game : sig
-  type t [@@deriving sexp]
+  type t =
+    { current_round : Round.t option
+    ; game_winner : Player.t option
+    ; rounds_won : (Player.t * int) list
+    ; dice_per_player : int
+    }
+  [@@deriving sexp]
 
   val init : dice_per_player:int -> t
   val rounds_won_by : t -> Player.t -> int

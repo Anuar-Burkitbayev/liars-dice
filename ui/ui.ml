@@ -33,32 +33,31 @@ let render_die ?(hidden = false) value =
 (* --- Model and helpers --- *)
 type model =
   { game : Game.t
-  ; round : Round.t option
   ; round_message : string option
-  ; final_winner : Player.t option
-  ; bid_count : int
-  ; bid_value : int
+  ; selected_move_index : int
   }
 [@@deriving sexp]
 
 let model_init () : model =
   { game = Game.init ~dice_per_player:5
-  ; round = Some (Round.init ~p1_dice:5 ~p2_dice:5)
   ; round_message = None
-  ; final_winner = None
-  ; bid_count = 1
-  ; bid_value = 1
+  ; selected_move_index = 0
   }
 ;;
 
 let bid_to_string = function
   | None -> "No bid yet"
-  | Some (bid : Bid.t) -> sprintf "%d %ds" bid.count bid.value
+  | Some (bid : Bid.t) -> sprintf "%d x %s" bid.count (dice_face bid.value)
+;;
+
+let move_to_string = function
+  | `Bid (bid : Bid.t) -> sprintf "%d x %s" bid.count (dice_face bid.value)
+  | `CallLiar -> "Call Liar"
 ;;
 
 let run_ai_until_human (m : model) : model =
   let rec loop m =
-    match Game.get_winner m.game, m.round with
+    match Game.get_winner m.game, Game.current_round m.game with
     | Some _, _ -> m
     | _, None -> m
     | None, Some round ->
@@ -68,38 +67,33 @@ let run_ai_until_human (m : model) : model =
          (match get_logical_move round with
           | `Bid b ->
             (match Round.make_bid round b with
-             | Ok new_round -> loop { m with round = Some new_round }
+             | Ok new_round ->
+               loop { m with game = { m.game with current_round = Some new_round } }
              | Error _ ->
                (* If AI produced invalid bid (shouldn't happen), call liar *)
                (match Round.call_liar round with
                 | Ok (winner, _) ->
                   let game' = Game.apply_round_result m.game winner in
-                  let final = Game.get_winner game' in
                   { m with
                     game = game'
-                  ; round = None
                   ; round_message =
                       Some
                         (if Player.equal winner Player.Player1
                          then "You won the round!"
                          else "You lost the round!")
-                  ; final_winner = final
                   }
                 | Error _ -> m))
           | `CallLiar ->
             (match Round.call_liar round with
              | Ok (winner, _) ->
                let game' = Game.apply_round_result m.game winner in
-               let final = Game.get_winner game' in
                { m with
                  game = game'
-               ; round = None
                ; round_message =
                    Some
                      (if Player.equal winner Player.Player1
                       then "You won the round!"
                       else "You lost the round!")
-               ; final_winner = final
                }
              | Error _ -> m)))
   in
@@ -121,7 +115,7 @@ let component =
   let%arr model = model
   and set_model = set_model in
   let game = model.game in
-  let round = model.round in
+  let round = Game.current_round game in
   let current_bid = Option.bind round ~f:Round.get_current_bid in
   let current_player = Option.map round ~f:Round.get_current_player in
   let p1_score = Game.rounds_won_by game Player.Player1 in
@@ -141,117 +135,91 @@ let component =
   let is_player_turn =
     Option.value_map current_player ~default:false ~f:(Player.equal Player.Player1)
   in
-  let game_in_progress = Option.is_none model.final_winner && Option.is_some round in
+  let game_in_progress = Option.is_none (Game.get_winner game) && Option.is_some round in
   let buttons_enabled = game_in_progress && is_player_turn in
-  let can_call_liar = buttons_enabled && Option.is_some current_bid in
+  (* Get valid moves for current state *)
+  let valid_moves =
+    Option.value_map round ~default:[] ~f:(fun r -> Round.get_all_moves r)
+  in
+  (* Ensure selected index is in bounds *)
+  let selected_move_index =
+    if List.length valid_moves = 0
+    then 0
+    else Int.min model.selected_move_index (List.length valid_moves - 1)
+  in
   (* Handlers *)
-  let on_bid_count_input =
+  let on_move_select =
     Attr.on_input (fun _ev str ->
-      let new_count = Option.value (Int.of_string_opt str) ~default:1 in
-      set_model { model with bid_count = Int.max 1 new_count })
+      let new_index = Option.value (Int.of_string_opt str) ~default:0 in
+      set_model { model with selected_move_index = new_index })
   in
-  let on_bid_value_input =
-    Attr.on_input (fun _ev str ->
-      let v = Option.value (Int.of_string_opt str) ~default:1 in
-      let v = Int.clamp_exn v ~min:1 ~max:6 in
-      set_model { model with bid_value = v })
-  in
-  let place_bid_handler =
+  let make_move_handler =
     Attr.on_click (fun _ev ->
-      match model.round with
+      match Game.current_round game with
       | None -> Effect.Ignore
       | Some round ->
         if not is_player_turn
         then Effect.Ignore
         else (
-          let bid = { Bid.count = model.bid_count; value = model.bid_value } in
-          match Round.make_bid round bid with
-          | Error _ -> Effect.Ignore
-          | Ok new_round ->
-            let m' = { model with round = Some new_round } in
-            let m'' = run_ai_until_human m' in
-            set_model m''))
-  in
-  let call_liar_handler =
-    Attr.on_click (fun _ev ->
-      match model.round with
-      | None -> Effect.Ignore
-      | Some round ->
-        if not (is_player_turn && Option.is_some (Round.get_current_bid round))
-        then Effect.Ignore
-        else (
-          match Round.call_liar round with
-          | Error _ -> Effect.Ignore
-          | Ok (winner, _msg) ->
-            let game' = Game.apply_round_result game winner in
-            let final = Game.get_winner game' in
-            let round_message =
-              if Player.equal winner Player.Player1
-              then "You won the round!"
-              else "You lost the round!"
-            in
-            set_model
-              { model with
-                game = game'
-              ; round = None
-              ; round_message = Some round_message
-              ; final_winner = final
-              }))
+          let selected_move = List.nth valid_moves selected_move_index in
+          match selected_move with
+          | None -> Effect.Ignore
+          | Some (`Bid bid) ->
+            (match Round.make_bid round bid with
+             | Error _ -> Effect.Ignore
+             | Ok new_round ->
+               let m' =
+                 { model with game = { game with current_round = Some new_round } }
+               in
+               let m'' = run_ai_until_human m' in
+               set_model m'')
+          | Some `CallLiar ->
+            (match Round.call_liar round with
+             | Error _ -> Effect.Ignore
+             | Ok (winner, _msg) ->
+               let game' = Game.apply_round_result game winner in
+               let round_message =
+                 if Player.equal winner Player.Player1
+                 then "You won the round!"
+                 else "You lost the round!"
+               in
+               set_model { model with game = game'; round_message = Some round_message })))
   in
   let overlay_dismiss_handler =
     Attr.on_click (fun _ev ->
-      match model.final_winner with
+      match Game.get_winner game with
       | Some _ -> set_model (model_init ())
       | None ->
         (* Start a new round *)
-        let m' =
-          { model with
-            round_message = None
-          ; round = Some (Round.init ~p1_dice:5 ~p2_dice:5)
-          }
-        in
+        let game' = Game.next_round_if_possible game in
+        let m' = { model with game = game'; round_message = None } in
         (* If AI somehow starts, let it move *)
         let m'' = run_ai_until_human m' in
         set_model m'')
   in
-  (* Inputs for bid (kept minimal to match mockup footprint) *)
-  let bid_controls =
+  (* Dropdown for valid moves *)
+  let move_controls =
     Node.div
       ~attrs:[ Attr.class_ "action-bar" ]
-      [ Node.input
+      [ Node.select
           ~attrs:
-            [ Attr.type_ "number"
-            ; Attr.create "min" "1"
-            ; Attr.create "max" "10"
-            ; Attr.value (Int.to_string model.bid_count)
-            ; (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
-            ; on_bid_count_input
+            [ (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
+            ; on_move_select
             ]
-          ()
-      ; Node.input
-          ~attrs:
-            [ Attr.type_ "number"
-            ; Attr.create "min" "1"
-            ; Attr.create "max" "6"
-            ; Attr.value (Int.to_string model.bid_value)
-            ; (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
-            ; on_bid_value_input
-            ]
-          ()
+          (List.mapi valid_moves ~f:(fun i move ->
+             Node.option
+               ~attrs:
+                 [ Attr.value (Int.to_string i)
+                 ; (if i = selected_move_index then Attr.selected else Attr.empty)
+                 ]
+               [ Node.text (move_to_string move) ]))
       ; Node.button
           ~attrs:
-            [ Attr.class_ "btn make-bid"
+            [ Attr.class_ "btn make-move"
             ; (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
-            ; place_bid_handler
+            ; make_move_handler
             ]
-          [ Node.text "Make Bid" ]
-      ; Node.button
-          ~attrs:
-            [ Attr.class_ "btn call-liar"
-            ; (if can_call_liar then Attr.empty else Attr.bool_property "disabled" true)
-            ; call_liar_handler
-            ]
-          [ Node.text "Call Liar" ]
+          [ Node.text "Make Move" ]
       ]
   in
   (* The view *)
@@ -295,11 +263,11 @@ let component =
             ; Node.div
                 ~attrs:[ Attr.class_ "player-label" ]
                 [ Node.text "You (Player 1)" ]
-            ; bid_controls
+            ; move_controls
             ]
         ]
     ; (* Overlay for round/game message *)
-      (match model.round_message, model.final_winner with
+      (match model.round_message, Game.get_winner game with
        | None, None -> Node.none
        | Some msg, None ->
          Node.div
