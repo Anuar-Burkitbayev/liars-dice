@@ -16,15 +16,13 @@
     <div id="app"></div>
     
     <!-- WebRTC Video Elements -->
-    <div id="video-container" style="display: none;">
-        <div id="local-video-wrapper">
-            <video id="localVideo" autoplay playsinline muted></video>
-            <div class="video-label">You</div>
-        </div>
-        <div id="remote-video-wrapper">
-            <video id="remoteVideo" autoplay playsinline></video>
-            <div class="video-label">Opponent</div>
-        </div>
+    <div id="remote-video-wrapper" style="display: none;">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div class="video-label">Opponent</div>
+    </div>
+    <div id="local-video-wrapper" style="display: none;">
+        <video id="localVideo" autoplay playsinline muted></video>
+        <div class="video-label">You</div>
         <div id="video-controls">
             <button id="toggleVideo" class="video-btn" title="Toggle Video">📹</button>
             <button id="toggleAudio" class="video-btn" title="Toggle Audio">🎤</button>

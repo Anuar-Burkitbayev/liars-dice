@@ -430,7 +430,8 @@ console.log('WebRTC module loaded');
 
 // Setup video controls when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-  const videoContainer = document.getElementById('video-container');
+  const localVideoWrapper = document.getElementById('local-video-wrapper');
+  const remoteVideoWrapper = document.getElementById('remote-video-wrapper');
   const toggleVideoBtn = document.getElementById('toggleVideo');
   const toggleAudioBtn = document.getElementById('toggleAudio');
 
@@ -464,24 +465,32 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Show video container when WebRTC is active
+  // Show video wrappers when WebRTC is active
   window.showVideoContainer = () => {
-    if (videoContainer) {
-      videoContainer.classList.add('active');
-      videoContainer.style.display = 'flex';
+    if (localVideoWrapper) {
+      localVideoWrapper.classList.add('active');
+      localVideoWrapper.style.display = 'block';
+    }
+    if (remoteVideoWrapper) {
+      remoteVideoWrapper.classList.add('active');
+      remoteVideoWrapper.style.display = 'block';
     }
   };
 
-  // Hide video container
+  // Hide video wrappers
   window.hideVideoContainer = () => {
-    if (videoContainer) {
-      videoContainer.classList.remove('active');
-      videoContainer.style.display = 'none';
+    if (localVideoWrapper) {
+      localVideoWrapper.classList.remove('active');
+      localVideoWrapper.style.display = 'none';
+    }
+    if (remoteVideoWrapper) {
+      remoteVideoWrapper.classList.remove('active');
+      remoteVideoWrapper.style.display = 'none';
     }
   };
 });
 
-// Override initialize to show video container
+// Override initialize to show video wrappers
 const originalInitialize = window.webrtc_initialize;
 window.webrtc_initialize = async (gameId, clientId, isInitiator) => {
   const result = await originalInitialize(gameId, clientId, isInitiator);
@@ -491,7 +500,7 @@ window.webrtc_initialize = async (gameId, clientId, isInitiator) => {
   return result;
 };
 
-// Override close to hide video container
+// Override close to hide video wrappers
 const originalClose = window.webrtc_close;
 window.webrtc_close = () => {
   originalClose();

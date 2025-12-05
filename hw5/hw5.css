@@ -260,37 +260,33 @@ color: #7f8c8d;
 }
 
 /* --- WebRTC Video Elements --- */
-#video-container {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    z-index: 1000;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-#video-container.active {
-    display: flex !important;
-}
-
 #local-video-wrapper,
 #remote-video-wrapper {
-    position: relative;
+    position: absolute;
     background: #000;
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-#local-video-wrapper {
-    width: 160px;
-    height: 120px;
+    width: 200px;
+    height: 150px;
+    z-index: 500;
 }
 
 #remote-video-wrapper {
-    width: 240px;
-    height: 180px;
+    top: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+#local-video-wrapper {
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+#local-video-wrapper.active,
+#remote-video-wrapper.active {
+    display: block !important;
 }
 
 #localVideo,
@@ -314,18 +310,21 @@ color: #7f8c8d;
 }
 
 #video-controls {
+    position: absolute;
+    top: 5px;
+    right: 5px;
     display: flex;
-    gap: 8px;
-    justify-content: center;
+    gap: 5px;
+    z-index: 10;
 }
 
 .video-btn {
     background: rgba(255, 255, 255, 0.9);
     border: none;
     border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    font-size: 1.2rem;
+    width: 32px;
+    height: 32px;
+    font-size: 1rem;
     cursor: pointer;
     transition: all 0.2s ease;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
@@ -362,19 +361,18 @@ color: #7f8c8d;
 
 /* Responsive adjustments for video */
 @media (max-width: 768px) {
-    #video-container {
-        bottom: 10px;
-        right: 10px;
-    }
-
-    #local-video-wrapper {
-        width: 120px;
-        height: 90px;
+    #local-video-wrapper,
+    #remote-video-wrapper {
+        width: 150px;
+        height: 112px;
     }
 
     #remote-video-wrapper {
-        width: 180px;
-        height: 135px;
+        top: 60px;
+    }
+
+    #local-video-wrapper {
+        bottom: 60px;
     }
 
     .video-btn {
