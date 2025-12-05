@@ -945,14 +945,23 @@ let component =
                  | None -> None
                in
                msg, justification)
-             else if model.round_end_ticks > 0
+             else if
+               model.round_end_ticks > 0 && Option.is_none (Game.current_round game_state)
              then
-               (* Preserve existing message during round end phase *)
+               (* Preserve existing message during round end phase, only if round is still over *)
                model.round_message, model.round_justification
+             else if Option.is_some (Game.current_round game_state)
+             then
+               (* Round is active, clear messages *)
+               None, None
              else model.round_message, model.round_justification
            in
            let round_end_ticks =
-             if should_show_round_end then 1 else model.round_end_ticks
+             if should_show_round_end
+             then 1
+             else if Option.is_some (Game.current_round game_state)
+             then 0
+             else model.round_end_ticks
            in
            (* Clear processing_move flag when syncing new game state *)
            set_model
