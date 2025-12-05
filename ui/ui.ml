@@ -544,14 +544,6 @@ module WebRTC = struct
        clientId, isInitiator); }"
   ;;
 
-  let toggle_video_js =
-    Js.Unsafe.js_expr "function(enabled) { return window.webrtc_toggle_video(enabled); }"
-  ;;
-
-  let toggle_audio_js =
-    Js.Unsafe.js_expr "function(enabled) { return window.webrtc_toggle_audio(enabled); }"
-  ;;
-
   let close_js = Js.Unsafe.js_expr "function() { return window.webrtc_close(); }"
 
   (* Initialize WebRTC connection *)
@@ -590,22 +582,6 @@ module WebRTC = struct
     Bonsai_web.Effect.of_deferred_fun
       (fun () -> initialize_async ~game_id ~client_id ~is_initiator)
       ()
-  ;;
-
-  (* Toggle video *)
-  let toggle_video ~enabled : bool =
-    let result =
-      Js.Unsafe.fun_call toggle_video_js [| Js.Unsafe.inject (Js.bool enabled) |]
-    in
-    Js.to_bool result
-  ;;
-
-  (* Toggle audio *)
-  let toggle_audio ~enabled : bool =
-    let result =
-      Js.Unsafe.fun_call toggle_audio_js [| Js.Unsafe.inject (Js.bool enabled) |]
-    in
-    Js.to_bool result
   ;;
 
   (* Close WebRTC connection *)
@@ -1434,39 +1410,6 @@ let component =
                 ; Node.p
                     ~attrs:[ Attr.id "bid-info" ]
                     [ Node.text (bid_to_string current_bid) ]
-                ; (if model.webrtc_enabled
-                   then
-                     Node.div
-                       ~attrs:
-                         [ Attr.style
-                             (Css_gen.concat
-                                [ Css_gen.font_size (`Rem 0.75)
-                                ; Css_gen.color (`Name "lightgreen")
-                                ; Css_gen.margin_top (`Rem 0.25)
-                                ])
-                         ; Attr.class_ "webrtc-controls"
-                         ]
-                       [ Node.span [ Node.text "🎥 Video Chat Active" ]
-                       ; Node.button
-                           ~attrs:
-                             [ Attr.class_ "btn btn-small"
-                             ; Attr.on_click (fun _ ->
-                                 let new_video = not model.video_enabled in
-                                 let _ = WebRTC.toggle_video ~enabled:new_video in
-                                 set_model { model with video_enabled = new_video })
-                             ]
-                           [ Node.text (if model.video_enabled then "📹" else "📹❌") ]
-                       ; Node.button
-                           ~attrs:
-                             [ Attr.class_ "btn btn-small"
-                             ; Attr.on_click (fun _ ->
-                                 let new_audio = not model.audio_enabled in
-                                 let _ = WebRTC.toggle_audio ~enabled:new_audio in
-                                 set_model { model with audio_enabled = new_audio })
-                             ]
-                           [ Node.text (if model.audio_enabled then "🎤" else "🎤❌") ]
-                       ]
-                   else Node.none)
                 ]
             ; Node.div
                 ~attrs:[ Attr.class_ "hand player-hand" ]

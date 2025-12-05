@@ -262,7 +262,7 @@ color: #7f8c8d;
 /* --- WebRTC Video Elements --- */
 #local-video-wrapper,
 #remote-video-wrapper {
-    position: absolute;
+    position: fixed;
     background: #000;
     border-radius: 8px;
     overflow: hidden;
@@ -270,18 +270,16 @@ color: #7f8c8d;
     width: 200px;
     height: 150px;
     z-index: 500;
+    left: 50%;
+    transform: translateX(-50%);
 }
 
 #remote-video-wrapper {
-    top: 80px;
-    left: 50%;
-    transform: translateX(-50%);
+    top: 20px;
 }
 
 #local-video-wrapper {
-    bottom: 80px;
-    left: 50%;
-    transform: translateX(-50%);
+    bottom: 250px;
 }
 
 #local-video-wrapper.active,
@@ -368,11 +366,11 @@ color: #7f8c8d;
     }
 
     #remote-video-wrapper {
-        top: 60px;
+        top: 15px;
     }
 
     #local-video-wrapper {
-        bottom: 60px;
+        bottom: 200px;
     }
 
     .video-btn {
