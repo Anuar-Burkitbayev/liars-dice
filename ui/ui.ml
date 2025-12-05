@@ -343,6 +343,27 @@ module Multiplayer = struct
     Bonsai_web.Effect.of_deferred_fun (fun () -> clear_queue_async ()) ()
   ;;
 
+  let delete_game_async ~game_id : (unit, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "DELETE") (Js.string (game_document_url game_id)) Js._true;
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if (status >= 200 && status < 300) || status = 404
+           then Ivar.fill ivar (Ok ())
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to delete game: %d" status))
+         | _ -> ());
+    ignore (xhr##send Js.null);
+    Ivar.read ivar
+  ;;
+
+  let delete_game_effect ~game_id =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> delete_game_async ~game_id) ()
+  ;;
+
   let find_game_for_client_async ~client_id : (string option, string) Result.t Deferred.t =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
@@ -495,6 +516,7 @@ type model =
   ; starter : int option
   ; my_player_number : int option
   ; processing_move : bool
+  ; last_round_hands : (Hand.t * Hand.t) option
   ; last_error : string option
   }
 [@@deriving sexp]
@@ -513,6 +535,7 @@ let model_init () : model =
   ; starter = None
   ; my_player_number = None
   ; processing_move = false
+  ; last_round_hands = None
   ; last_error = None
   }
 ;;
@@ -742,6 +765,8 @@ let component =
                  let rotated =
                    maybe_rotate_game_for_starter game_state my_player_number
                  in
+                 (* Clear ourselves from the queue since we found a match *)
+                 let%bind _ = Multiplayer.clear_queue_effect () in
                  set_model
                    { model with
                      game = rotated
@@ -899,23 +924,45 @@ let component =
           let game' = Game.next_round_if_possible model.game in
           match model.current_game_id with
           | Some gid when equal_game_mode model.game_mode OnlineMode ->
-            (* Sync new round to Firebase *)
-            let open Vdom.Effect.Let_syntax in
-            (* Save canonical game state (Player1 perspective) to Firebase *)
-            let canonical_game = get_canonical_game_state game' model.my_player_number in
-            let%bind res =
-              Multiplayer.save_game_state_effect ~game_id:gid ~game_state:canonical_game
-            in
-            (match res with
-             | Ok () ->
-               set_model
-                 { model with game = game'; round_message = None; round_end_ticks = 0 }
-             | Error err ->
-               set_model
-                 { model with last_error = Some ("Sync new round failed: " ^ err) })
+            (* Only Player 1 (canonical) should start new round to avoid race condition *)
+            if Option.equal Int.equal model.my_player_number (Some 1)
+            then
+              let open Vdom.Effect.Let_syntax in
+              (* Save canonical game state (Player1 perspective) to Firebase *)
+              let canonical_game =
+                get_canonical_game_state game' model.my_player_number
+              in
+              let%bind res =
+                Multiplayer.save_game_state_effect ~game_id:gid ~game_state:canonical_game
+              in
+              match res with
+              | Ok () ->
+                set_model
+                  { model with
+                    game = game'
+                  ; round_message = None
+                  ; round_end_ticks = 0
+                  ; last_round_hands = None
+                  }
+              | Error err ->
+                set_model
+                  { model with last_error = Some ("Sync new round failed: " ^ err) }
+            else
+              (* Player 2 just waits for sync to get the new round *)
+              set_model
+                { model with
+                  round_message = None
+                ; round_end_ticks = 0
+                ; last_round_hands = None
+                }
           | _ ->
             set_model
-              { model with game = game'; round_message = None; round_end_ticks = 0 })
+              { model with
+                game = game'
+              ; round_message = None
+              ; round_end_ticks = 0
+              ; last_round_hands = None
+              })
         else set_model { model with round_end_ticks = model.round_end_ticks + 1 }
       else if
         equal_game_mode model.game_mode AIMode
@@ -967,10 +1014,14 @@ let component =
       let p1_score = Game.rounds_won_by game Player.Player1 in
       let p2_score = Game.rounds_won_by game Player.Player2 in
       let p1_hand =
-        Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player1)
+        match round with
+        | Some r -> Round.hand_of r Player.Player1
+        | None -> Option.value_map model.last_round_hands ~default:[] ~f:fst
       in
       let p2_hand =
-        Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player2)
+        match round with
+        | Some r -> Round.hand_of r Player.Player2
+        | None -> Option.value_map model.last_round_hands ~default:[] ~f:snd
       in
       let turn_text =
         match current_player with
@@ -1051,13 +1102,47 @@ let component =
                   match Round.call_liar round with
                   | Error _ -> Effect.Ignore
                   | Ok (winner, _msg) ->
+                    (* Save current hands before clearing round *)
+                    let saved_hands =
+                      Some
+                        ( Round.hand_of round Player.Player1
+                        , Round.hand_of round Player.Player2 )
+                    in
                     let game' = Game.apply_round_result game winner in
                     (* Clear the current round so both players can detect round end *)
                     let game_with_round_cleared = { game' with current_round = None } in
+                    (* Determine round message based on canonical winner *)
+                    let canonical_game =
+                      get_canonical_game_state
+                        game_with_round_cleared
+                        model.my_player_number
+                    in
+                    let canonical_winner_opt =
+                      let p1_old =
+                        Game.rounds_won_by
+                          (get_canonical_game_state game model.my_player_number)
+                          Player.Player1
+                      in
+                      let p2_old =
+                        Game.rounds_won_by
+                          (get_canonical_game_state game model.my_player_number)
+                          Player.Player2
+                      in
+                      let p1_new = Game.rounds_won_by canonical_game Player.Player1 in
+                      let p2_new = Game.rounds_won_by canonical_game Player.Player2 in
+                      if p1_new > p1_old
+                      then Some Player.Player1
+                      else if p2_new > p2_old
+                      then Some Player.Player2
+                      else None
+                    in
                     let round_message =
-                      if Player.equal winner Player.Player1
-                      then "You won the round!"
-                      else "You lost the round!"
+                      match canonical_winner_opt, model.my_player_number with
+                      | Some Player.Player1, Some 1 -> "You won the round!"
+                      | Some Player.Player2, Some 2 -> "You won the round!"
+                      | Some Player.Player1, Some 2 -> "You lost the round!"
+                      | Some Player.Player2, Some 1 -> "You lost the round!"
+                      | _ -> "Round ended"
                     in
                     (match model.current_game_id with
                      | Some gid ->
@@ -1081,6 +1166,7 @@ let component =
                               game = game_with_round_cleared
                             ; round_message = Some round_message
                             ; round_end_ticks = 1
+                            ; last_round_hands = saved_hands
                             ; processing_move = false
                             }
                         | Error err ->
@@ -1095,6 +1181,7 @@ let component =
                            game = game_with_round_cleared
                          ; round_message = Some round_message
                          ; round_end_ticks = 1
+                         ; last_round_hands = saved_hands
                          }))))
       in
       let move_controls =
@@ -1199,22 +1286,48 @@ let component =
                            ~attrs:
                              [ Attr.class_ "btn btn-mode"
                              ; Attr.on_click (fun _ev ->
-                                 set_model
-                                   { (model_init ()) with
-                                     game_mode = AIMode
-                                   ; game = Game.init ~dice_per_player:5
-                                   })
+                                 (* Clean up the finished game if it exists *)
+                                 match model.current_game_id with
+                                 | Some gid ->
+                                   let open Vdom.Effect.Let_syntax in
+                                   let%bind _ =
+                                     Multiplayer.delete_game_effect ~game_id:gid
+                                   in
+                                   set_model
+                                     { (model_init ()) with
+                                       game_mode = AIMode
+                                     ; game = Game.init ~dice_per_player:5
+                                     }
+                                 | None ->
+                                   set_model
+                                     { (model_init ()) with
+                                       game_mode = AIMode
+                                     ; game = Game.init ~dice_per_player:5
+                                     })
                              ]
                            [ Node.text "AI" ]
                        ; Node.button
                            ~attrs:
                              [ Attr.class_ "btn btn-mode"
                              ; Attr.on_click (fun _ev ->
-                                 set_model
-                                   { (model_init ()) with
-                                     game_mode = OnlineMode
-                                   ; waiting_in_queue = true
-                                   })
+                                 (* Clean up the finished game if it exists *)
+                                 match model.current_game_id with
+                                 | Some gid ->
+                                   let open Vdom.Effect.Let_syntax in
+                                   let%bind _ =
+                                     Multiplayer.delete_game_effect ~game_id:gid
+                                   in
+                                   set_model
+                                     { (model_init ()) with
+                                       game_mode = OnlineMode
+                                     ; waiting_in_queue = true
+                                     }
+                                 | None ->
+                                   set_model
+                                     { (model_init ()) with
+                                       game_mode = OnlineMode
+                                     ; waiting_in_queue = true
+                                     })
                              ]
                            [ Node.text "Online" ]
                        ]
