@@ -860,6 +860,7 @@ let component =
            let round_end_ticks =
              if should_show_round_end then 1 else model.round_end_ticks
            in
+           (* Clear processing_move flag when syncing new game state *)
            set_model
              { model with
                game = rotated
@@ -867,6 +868,7 @@ let component =
              ; my_player_number
              ; round_message
              ; round_end_ticks
+             ; processing_move = false
              ; last_error = None
              })
     in
@@ -1171,11 +1173,17 @@ let component =
              Node.div
                ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
                [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
-           | _, Some winner ->
+           | _, Some _ ->
+             (* Determine winner from canonical game state *)
+             let canonical_game = get_canonical_game_state game model.my_player_number in
+             let canonical_winner = Game.get_winner canonical_game in
              let msg =
-               if Player.equal winner Player.Player1
-               then "You won the game!"
-               else "You lost the game!"
+               match canonical_winner, model.my_player_number with
+               | Some Player.Player1, Some 1 -> "You won the game!"
+               | Some Player.Player2, Some 2 -> "You won the game!"
+               | Some Player.Player1, Some 2 -> "You lost the game!"
+               | Some Player.Player2, Some 1 -> "You lost the game!"
+               | _ -> "Game over!"
              in
              Node.div
                ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
@@ -1370,6 +1378,7 @@ let component =
              ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
              [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
          | _, Some winner ->
+           (* In AI mode, player is always Player1 in local view *)
            let msg =
              if Player.equal winner Player.Player1
              then "You won the game!"
