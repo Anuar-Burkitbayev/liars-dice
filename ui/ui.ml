@@ -26,12 +26,18 @@ module Multiplayer = struct
     Printf.sprintf "%s/%s?key=%s" base_url (game_document_path game_id) firebase_api_key
   ;;
 
-  let state_update_url game_id =
+  let state_update_url game_id ~with_hands =
+    let mask_params =
+      if with_hands
+      then "&updateMask.fieldPaths=state&updateMask.fieldPaths=last_p1_hand&updateMask.fieldPaths=last_p2_hand"
+      else "&updateMask.fieldPaths=state"
+    in
     Printf.sprintf
-      "%s/%s?updateMask.fieldPaths=state&key=%s"
+      "%s/%s?key=%s%s"
       base_url
       (game_document_path game_id)
       firebase_api_key
+      mask_params
   ;;
 
   let queue_document_path = "matchmaking/waiting"
@@ -194,7 +200,8 @@ module Multiplayer = struct
     =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
-    xhr##_open (Js.string "PATCH") (Js.string (state_update_url game_id)) Js._true;
+    let with_hands = Option.is_some last_round_hands in
+    xhr##_open (Js.string "PATCH") (Js.string (state_update_url game_id ~with_hands)) Js._true;
     xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
     let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
     let hands_fields =
@@ -1407,10 +1414,21 @@ let component =
     let p1_score = Game.rounds_won_by model.game Player.Player1 in
     let p2_score = Game.rounds_won_by model.game Player.Player2 in
     let p1_hand =
-      Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player1)
+      match round with
+      | Some r -> Round.hand_of r Player.Player1
+      | None ->
+        (* For round end, use saved hands *)
+        (match model.last_round_hands with
+         | Some (h1, _) -> h1
+         | None -> [])
     in
     let p2_hand =
-      Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player2)
+      match round with
+      | Some r -> Round.hand_of r Player.Player2
+      | None ->
+        (match model.last_round_hands with
+         | Some (_, h2) -> h2
+         | None -> [])
     in
     let turn_text =
       match current_player with
@@ -1465,7 +1483,7 @@ let component =
             | Some `CallLiar ->
               (match Round.call_liar round with
                | Error _ -> Effect.Ignore
-               | Ok (winner, _msg) ->
+               | Ok (winner, justification) ->
                  let game' = Game.apply_round_result model.game winner in
                  let game_with_round_cleared = { game' with current_round = None } in
                  let round_message =
@@ -1477,6 +1495,7 @@ let component =
                    { model with
                      game = game_with_round_cleared
                    ; round_message = Some round_message
+                   ; round_justification = Some justification
                    ; round_end_ticks = 1
                    })))
     in
@@ -1508,7 +1527,9 @@ let component =
             [ Node.text "Make Move" ]
         ]
     in
-    let show_opponent_dice = Option.is_some model.round_message in
+    let show_opponent_dice =
+      Option.is_some model.round_message || Option.is_some model.last_round_hands
+    in
     Node.div
       [ Node.div
           ~attrs:[ Attr.class_ "game-container" ]
