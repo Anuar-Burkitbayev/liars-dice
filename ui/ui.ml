@@ -830,21 +830,31 @@ let component =
            let round_message =
              if should_show_round_end
              then (
-               let winner_opt =
-                 let p1_old = Game.rounds_won_by model.game Player.Player1 in
-                 let p2_old = Game.rounds_won_by model.game Player.Player2 in
-                 let p1_new = Game.rounds_won_by rotated Player.Player1 in
-                 let p2_new = Game.rounds_won_by rotated Player.Player2 in
+               (* Compare scores in canonical (unrotated) game state to determine actual winner *)
+               let canonical_old =
+                 get_canonical_game_state model.game model.my_player_number
+               in
+               let canonical_new =
+                 get_canonical_game_state rotated model.my_player_number
+               in
+               let p1_old = Game.rounds_won_by canonical_old Player.Player1 in
+               let p2_old = Game.rounds_won_by canonical_old Player.Player2 in
+               let p1_new = Game.rounds_won_by canonical_new Player.Player1 in
+               let p2_new = Game.rounds_won_by canonical_new Player.Player2 in
+               let canonical_winner =
                  if p1_new > p1_old
                  then Some Player.Player1
                  else if p2_new > p2_old
                  then Some Player.Player2
                  else None
                in
-               match winner_opt with
-               | Some Player.Player1 -> Some "You won the round!"
-               | Some Player.Player2 -> Some "You lost the round!"
-               | None -> model.round_message)
+               (* Check if I (based on my_player_number) won *)
+               match canonical_winner, model.my_player_number with
+               | Some Player.Player1, Some 1 -> Some "You won the round!"
+               | Some Player.Player2, Some 2 -> Some "You won the round!"
+               | Some Player.Player1, Some 2 -> Some "You lost the round!"
+               | Some Player.Player2, Some 1 -> Some "You lost the round!"
+               | _ -> model.round_message)
              else model.round_message
            in
            let round_end_ticks =
@@ -1190,8 +1200,13 @@ let component =
                            [ Node.text "AI" ]
                        ; Node.button
                            ~attrs:
-                             [ Attr.class_ "btn btn-mode btn-disabled"
-                             ; Attr.bool_property "disabled" true
+                             [ Attr.class_ "btn btn-mode"
+                             ; Attr.on_click (fun _ev ->
+                                 set_model
+                                   { (model_init ()) with
+                                     game_mode = OnlineMode
+                                   ; waiting_in_queue = true
+                                   })
                              ]
                            [ Node.text "Online" ]
                        ]
@@ -1383,8 +1398,13 @@ let component =
                          [ Node.text "AI" ]
                      ; Node.button
                          ~attrs:
-                           [ Attr.class_ "btn btn-mode btn-disabled"
-                           ; Attr.bool_property "disabled" true
+                           [ Attr.class_ "btn btn-mode"
+                           ; Attr.on_click (fun _ev ->
+                               set_model
+                                 { (model_init ()) with
+                                   game_mode = OnlineMode
+                                 ; waiting_in_queue = true
+                                 })
                            ]
                          [ Node.text "Online" ]
                      ]
