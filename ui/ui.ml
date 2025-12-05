@@ -606,43 +606,48 @@ let execute_ai_move (m : model) : model =
         | Error _ -> { m with ai_thinking = false }))
 ;;
 
-let swap_players_in_game (game : Game.t) : Game.t =
-  match game.current_round with
-  | None -> game
+(* Helper functions to get player-specific views without rotating game state *)
+let my_player (my_player_number : int option) : Player.t =
+  match my_player_number with
+  | Some 1 -> Player.Player1
+  | Some 2 -> Player.Player2
+  | _ -> Player.Player1 (* Default for local/AI mode *)
+;;
+
+let opponent_player (my_player_number : int option) : Player.t =
+  Player.opposite (my_player my_player_number)
+;;
+
+let my_hand (game : Game.t) (my_player_number : int option) : Hand.t =
+  match Game.current_round game with
+  | None -> []
+  | Some round -> Round.hand_of round (my_player my_player_number)
+;;
+
+let opponent_hand (game : Game.t) (my_player_number : int option) : Hand.t =
+  match Game.current_round game with
+  | None -> []
+  | Some round -> Round.hand_of round (opponent_player my_player_number)
+;;
+
+let my_score (game : Game.t) (my_player_number : int option) : int =
+  Game.rounds_won_by game (my_player my_player_number)
+;;
+
+let opponent_score (game : Game.t) (my_player_number : int option) : int =
+  Game.rounds_won_by game (opponent_player my_player_number)
+;;
+
+let is_my_turn (game : Game.t) (my_player_number : int option) : bool =
+  match Game.current_round game with
+  | None -> false
   | Some round ->
-    let swapped_hands =
-      List.map round.hands ~f:(fun (player, hand) -> Player.opposite player, hand)
-    in
-    let swapped_current_player = Player.opposite round.current_player in
-    let swapped_round =
-      { round with hands = swapped_hands; current_player = swapped_current_player }
-    in
-    let swapped_rounds_won =
-      List.map game.rounds_won ~f:(fun (player, wins) -> Player.opposite player, wins)
-    in
-    let swapped_game_winner = Option.map game.game_winner ~f:Player.opposite in
-    { game with
-      current_round = Some swapped_round
-    ; rounds_won = swapped_rounds_won
-    ; game_winner = swapped_game_winner
-    }
+    Player.equal (Round.get_current_player round) (my_player my_player_number)
 ;;
 
-let maybe_rotate_game_for_starter (game : Game.t) (my_player_number : int option) : Game.t
-  =
-  match my_player_number with
-  | None -> game
-  | Some player_num ->
-    (* If we are Player2, we need to swap the game perspective *)
-    if player_num = 2 then swap_players_in_game game else game
-;;
-
-let get_canonical_game_state (game : Game.t) (my_player_number : int option) : Game.t =
-  match my_player_number with
-  | None -> game
-  | Some player_num ->
-    (* If we are Player2, unswap to get canonical form (Player1 perspective) *)
-    if player_num = 2 then swap_players_in_game game else game
+let did_i_win (game : Game.t) (my_player_number : int option) : bool option =
+  Option.map (Game.get_winner game) ~f:(fun winner ->
+    Player.equal winner (my_player my_player_number))
 ;;
 
 let render_title_screen model set_model =
@@ -762,14 +767,11 @@ let component =
                    | _, Some p2 when String.equal p2 model.client_id -> Some 2
                    | _ -> None
                  in
-                 let rotated =
-                   maybe_rotate_game_for_starter game_state my_player_number
-                 in
                  (* Clear ourselves from the queue since we found a match *)
                  let%bind _ = Multiplayer.clear_queue_effect () in
                  set_model
                    { model with
-                     game = rotated
+                     game = game_state
                    ; waiting_in_queue = false
                    ; current_game_id = Some found_game_id
                    ; starter
@@ -806,12 +808,9 @@ let component =
                    | _, Some p2 when String.equal p2 model.client_id -> Some 2
                    | _ -> None
                  in
-                 let rotated =
-                   maybe_rotate_game_for_starter game_state my_player_number
-                 in
                  set_model
                    { model with
-                     game = rotated
+                     game = game_state
                    ; waiting_in_queue = false
                    ; current_game_id = Some created_game_id
                    ; starter
@@ -845,41 +844,21 @@ let component =
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
            in
-           let rotated = maybe_rotate_game_for_starter game_state my_player_number in
            (* Check if round just ended (game has no current_round but previous did) *)
            let should_show_round_end =
-             Option.is_none (Game.current_round rotated)
+             Option.is_none (Game.current_round game_state)
              && Option.is_some (Game.current_round model.game)
              && model.round_end_ticks = 0
            in
            let round_message =
              if should_show_round_end
              then (
-               (* Compare scores in canonical (unrotated) game state to determine actual winner *)
-               let canonical_old =
-                 get_canonical_game_state model.game model.my_player_number
-               in
-               let canonical_new =
-                 get_canonical_game_state rotated model.my_player_number
-               in
-               let p1_old = Game.rounds_won_by canonical_old Player.Player1 in
-               let p2_old = Game.rounds_won_by canonical_old Player.Player2 in
-               let p1_new = Game.rounds_won_by canonical_new Player.Player1 in
-               let p2_new = Game.rounds_won_by canonical_new Player.Player2 in
-               let canonical_winner =
-                 if p1_new > p1_old
-                 then Some Player.Player1
-                 else if p2_new > p2_old
-                 then Some Player.Player2
-                 else None
-               in
-               (* Check if I (based on my_player_number) won *)
-               match canonical_winner, model.my_player_number with
-               | Some Player.Player1, Some 1 -> Some "You won the round!"
-               | Some Player.Player2, Some 2 -> Some "You won the round!"
-               | Some Player.Player1, Some 2 -> Some "You lost the round!"
-               | Some Player.Player2, Some 1 -> Some "You lost the round!"
-               | _ -> model.round_message)
+               (* Compare scores to determine round winner *)
+               let my_old_score = my_score model.game my_player_number in
+               let my_new_score = my_score game_state my_player_number in
+               if my_new_score > my_old_score
+               then Some "You won the round!"
+               else Some "You lost the round!")
              else model.round_message
            in
            let round_end_ticks =
@@ -888,7 +867,7 @@ let component =
            (* Clear processing_move flag when syncing new game state *)
            set_model
              { model with
-               game = rotated
+               game = game_state
              ; starter
              ; my_player_number
              ; round_message
@@ -928,12 +907,9 @@ let component =
             if Option.equal Int.equal model.my_player_number (Some 1)
             then
               let open Vdom.Effect.Let_syntax in
-              (* Save canonical game state (Player1 perspective) to Firebase *)
-              let canonical_game =
-                get_canonical_game_state game' model.my_player_number
-              in
+              (* Game state is already canonical, save directly *)
               let%bind res =
-                Multiplayer.save_game_state_effect ~game_id:gid ~game_state:canonical_game
+                Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
               in
               match res with
               | Ok () ->
@@ -1010,26 +986,35 @@ let component =
     else (
       let round = Game.current_round game in
       let current_bid = Option.bind round ~f:Round.get_current_bid in
-      let current_player = Option.map round ~f:Round.get_current_player in
-      let p1_score = Game.rounds_won_by game Player.Player1 in
-      let p2_score = Game.rounds_won_by game Player.Player2 in
-      let p1_hand =
+      let my_score_val = my_score game model.my_player_number in
+      let opponent_score_val = opponent_score game model.my_player_number in
+      let my_hand_val =
         match round with
-        | Some r -> Round.hand_of r Player.Player1
-        | None -> Option.value_map model.last_round_hands ~default:[] ~f:fst
+        | Some _ -> my_hand game model.my_player_number
+        | None ->
+          (* For round end, use saved hands based on player number *)
+          (match model.my_player_number, model.last_round_hands with
+           | Some 1, Some (h1, _) -> h1
+           | Some 2, Some (_, h2) -> h2
+           | _ -> [])
       in
-      let p2_hand =
+      let opponent_hand_val =
         match round with
-        | Some r -> Round.hand_of r Player.Player2
-        | None -> Option.value_map model.last_round_hands ~default:[] ~f:snd
+        | Some _ -> opponent_hand game model.my_player_number
+        | None ->
+          (match model.my_player_number, model.last_round_hands with
+           | Some 1, Some (_, h2) -> h2
+           | Some 2, Some (h1, _) -> h1
+           | _ -> [])
       in
       let turn_text =
-        match current_player with
-        | None -> "Game over"
-        | Some Player.Player1 -> "Your Turn"
-        | Some Player.Player2 -> "Opponent's Turn"
+        if is_my_turn game model.my_player_number
+        then "Your Turn"
+        else if Option.is_some round
+        then "Opponent's Turn"
+        else "Game over"
       in
-      let is_player_turn = is_local_player_turn model in
+      let is_player_turn = is_my_turn game model.my_player_number in
       let game_in_progress =
         Option.is_none (Game.get_winner game) && Option.is_some round
       in
@@ -1075,14 +1060,11 @@ let component =
                      | Some gid ->
                        let open Vdom.Effect.Let_syntax in
                        let%bind _ = set_model { model with processing_move = true } in
-                       (* Save canonical game state (Player1 perspective) to Firebase *)
-                       let canonical_game =
-                         get_canonical_game_state new_game model.my_player_number
-                       in
+                       (* Game state is already canonical, save directly *)
                        let%bind res =
                          Multiplayer.save_game_state_effect
                            ~game_id:gid
-                           ~game_state:canonical_game
+                           ~game_state:new_game
                        in
                        (match res with
                         | Ok () ->
@@ -1111,53 +1093,21 @@ let component =
                     let game' = Game.apply_round_result game winner in
                     (* Clear the current round so both players can detect round end *)
                     let game_with_round_cleared = { game' with current_round = None } in
-                    (* Determine round message based on canonical winner *)
-                    let canonical_game =
-                      get_canonical_game_state
-                        game_with_round_cleared
-                        model.my_player_number
-                    in
-                    let canonical_winner_opt =
-                      let p1_old =
-                        Game.rounds_won_by
-                          (get_canonical_game_state game model.my_player_number)
-                          Player.Player1
-                      in
-                      let p2_old =
-                        Game.rounds_won_by
-                          (get_canonical_game_state game model.my_player_number)
-                          Player.Player2
-                      in
-                      let p1_new = Game.rounds_won_by canonical_game Player.Player1 in
-                      let p2_new = Game.rounds_won_by canonical_game Player.Player2 in
-                      if p1_new > p1_old
-                      then Some Player.Player1
-                      else if p2_new > p2_old
-                      then Some Player.Player2
-                      else None
-                    in
+                    (* Determine if I won based on the winner *)
                     let round_message =
-                      match canonical_winner_opt, model.my_player_number with
-                      | Some Player.Player1, Some 1 -> "You won the round!"
-                      | Some Player.Player2, Some 2 -> "You won the round!"
-                      | Some Player.Player1, Some 2 -> "You lost the round!"
-                      | Some Player.Player2, Some 1 -> "You lost the round!"
-                      | _ -> "Round ended"
+                      if Player.equal winner (my_player model.my_player_number)
+                      then "You won the round!"
+                      else "You lost the round!"
                     in
                     (match model.current_game_id with
                      | Some gid ->
                        let open Vdom.Effect.Let_syntax in
                        let%bind _ = set_model { model with processing_move = true } in
-                       (* Save canonical game state (Player1 perspective) to Firebase *)
-                       let canonical_game =
-                         get_canonical_game_state
-                           game_with_round_cleared
-                           model.my_player_number
-                       in
+                       (* Game state is already canonical, save directly *)
                        let%bind res =
                          Multiplayer.save_game_state_effect
                            ~game_id:gid
-                           ~game_state:canonical_game
+                           ~game_state:game_with_round_cleared
                        in
                        (match res with
                         | Ok () ->
@@ -1218,12 +1168,10 @@ let component =
             ~attrs:[ Attr.class_ "game-container" ]
             [ Node.div
                 ~attrs:[ Attr.class_ "hand" ]
-                [ Node.div
-                    ~attrs:[ Attr.class_ "player-label" ]
-                    [ Node.text "Opponent (Player 2)" ]
+                [ Node.div ~attrs:[ Attr.class_ "player-label" ] [ Node.text "Opponent" ]
                 ; Node.div
                     ~attrs:[ Attr.class_ "dice-container" ]
-                    (List.map p2_hand ~f:(fun v ->
+                    (List.map opponent_hand_val ~f:(fun v ->
                        render_die ~hidden:(not show_opponent_dice) v))
                 ]
             ; Node.div
@@ -1233,10 +1181,10 @@ let component =
                     ~attrs:[ Attr.class_ "scoreboard" ]
                     [ Node.span
                         ~attrs:[ Attr.class_ "score player1-score" ]
-                        [ Node.text (sprintf "Player 1: %d" p1_score) ]
+                        [ Node.text (sprintf "You: %d" my_score_val) ]
                     ; Node.span
                         ~attrs:[ Attr.class_ "score player2-score" ]
-                        [ Node.text (sprintf "Player 2: %d" p2_score) ]
+                        [ Node.text (sprintf "Opponent: %d" opponent_score_val) ]
                     ]
                 ; Node.p ~attrs:[ Attr.id "turn-info" ] [ Node.text turn_text ]
                 ; Node.p
@@ -1247,10 +1195,8 @@ let component =
                 ~attrs:[ Attr.class_ "hand player-hand" ]
                 [ Node.div
                     ~attrs:[ Attr.class_ "dice-container" ]
-                    (List.map p1_hand ~f:(render_die ~hidden:false))
-                ; Node.div
-                    ~attrs:[ Attr.class_ "player-label" ]
-                    [ Node.text "You (Player 1)" ]
+                    (List.map my_hand_val ~f:(render_die ~hidden:false))
+                ; Node.div ~attrs:[ Attr.class_ "player-label" ] [ Node.text "You" ]
                 ; move_controls
                 ]
             ]
@@ -1261,16 +1207,11 @@ let component =
                ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
                [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
            | _, Some _ ->
-             (* Determine winner from canonical game state *)
-             let canonical_game = get_canonical_game_state game model.my_player_number in
-             let canonical_winner = Game.get_winner canonical_game in
              let msg =
-               match canonical_winner, model.my_player_number with
-               | Some Player.Player1, Some 1 -> "You won the game!"
-               | Some Player.Player2, Some 2 -> "You won the game!"
-               | Some Player.Player1, Some 2 -> "You lost the game!"
-               | Some Player.Player2, Some 1 -> "You lost the game!"
-               | _ -> "Game over!"
+               match did_i_win game model.my_player_number with
+               | Some true -> "You won the game!"
+               | Some false -> "You lost the game!"
+               | None -> "Game over!"
              in
              Node.div
                ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
