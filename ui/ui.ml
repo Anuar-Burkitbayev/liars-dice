@@ -577,15 +577,20 @@ let execute_ai_move (m : model) : model =
         | Error _ ->
           (match Round.call_liar round with
            | Ok (winner, justification) ->
+             let saved_hands =
+               Round.hand_of round Player.Player1, Round.hand_of round Player.Player2
+             in
              let game' = Game.apply_round_result m.game winner in
+             let game_cleared = { game' with current_round = None } in
              { m with
-               game = game'
+               game = game_cleared
              ; round_message =
                  Some
                    (if Player.equal winner Player.Player1
                     then "You won the round!"
                     else "You lost the round!")
              ; round_justification = Some justification
+             ; last_round_hands = Some saved_hands
              ; ai_thinking = false
              ; round_end_ticks = 1
              }
@@ -593,15 +598,20 @@ let execute_ai_move (m : model) : model =
      | `CallLiar ->
        (match Round.call_liar round with
         | Ok (winner, justification) ->
+          let saved_hands =
+            Round.hand_of round Player.Player1, Round.hand_of round Player.Player2
+          in
           let game' = Game.apply_round_result m.game winner in
+          let game_cleared = { game' with current_round = None } in
           { m with
-            game = game'
+            game = game_cleared
           ; round_message =
               Some
                 (if Player.equal winner Player.Player1
                  then "You won the round!"
                  else "You lost the round!")
           ; round_justification = Some justification
+          ; last_round_hands = Some saved_hands
           ; ai_thinking = false
           ; round_end_ticks = 1
           }
@@ -846,11 +856,13 @@ let component =
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
            in
-           (* Check if round just ended by comparing scores *)
+           (* Check if round just ended (round cleared but scores changed) *)
            let my_old_score = my_score model.game my_player_number in
            let my_new_score = my_score game_state my_player_number in
            let should_show_round_end =
-             my_new_score <> my_old_score && model.round_end_ticks = 0
+             Option.is_none (Game.current_round game_state)
+             && Option.is_some (Game.current_round model.game)
+             && model.round_end_ticks = 0
            in
            let round_message, round_justification =
              if should_show_round_end
@@ -860,9 +872,9 @@ let component =
                  then Some "You won the round!"
                  else Some "You lost the round!"
                in
-               (* Calculate justification from the round *)
+               (* Try to get justification from the old round that still exists *)
                let justification =
-                 match Game.current_round game_state with
+                 match Game.current_round model.game with
                  | Some round ->
                    (match Round.call_liar round with
                     | Ok (_, just) -> Some just
@@ -1106,8 +1118,8 @@ let component =
                         , Round.hand_of round Player.Player2 )
                     in
                     let game' = Game.apply_round_result game winner in
-                    (* Keep the round intact so both players can see the dice.
-                       It will be cleared when starting a new round. *)
+                    (* Clear the round's current_round to signal round end, but save hands *)
+                    let game_cleared = { game' with current_round = None } in
                     (* Determine if I won based on the winner *)
                     let round_message =
                       if Player.equal winner (my_player model.my_player_number)
@@ -1120,13 +1132,15 @@ let component =
                        let%bind _ = set_model { model with processing_move = true } in
                        (* Game state is already canonical, save directly *)
                        let%bind res =
-                         Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+                         Multiplayer.save_game_state_effect
+                           ~game_id:gid
+                           ~game_state:game_cleared
                        in
                        (match res with
                         | Ok () ->
                           set_model
                             { model with
-                              game = game'
+                              game = game_cleared
                             ; round_message = Some round_message
                             ; round_justification = Some justification
                             ; round_end_ticks = 1
@@ -1142,7 +1156,7 @@ let component =
                      | None ->
                        set_model
                          { model with
-                           game = game'
+                           game = game_cleared
                          ; round_message = Some round_message
                          ; round_justification = Some justification
                          ; round_end_ticks = 1
