@@ -906,11 +906,11 @@ let component =
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
            in
-           (* Use fetched hands if round is cleared *)
+           (* Use fetched hands if available, otherwise keep existing *)
            let hands_to_use =
-             match Game.current_round game_state, fetched_hands with
-             | None, Some h -> Some h
-             | _ -> model.last_round_hands
+             match fetched_hands with
+             | Some h -> Some h
+             | None -> model.last_round_hands
            in
            (* Check if round just ended (round cleared but scores changed) *)
            let my_old_score = my_score model.game my_player_number in
@@ -938,6 +938,10 @@ let component =
                  | None -> None
                in
                msg, justification)
+             else if model.round_end_ticks > 0
+             then
+               (* Preserve existing message during round end phase *)
+               model.round_message, model.round_justification
              else model.round_message, model.round_justification
            in
            let round_end_ticks =
