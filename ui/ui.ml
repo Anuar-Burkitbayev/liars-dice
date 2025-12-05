@@ -612,6 +612,14 @@ let maybe_rotate_game_for_starter (game : Game.t) (my_player_number : int option
     if player_num = 2 then swap_players_in_game game else game
 ;;
 
+let get_canonical_game_state (game : Game.t) (my_player_number : int option) : Game.t =
+  match my_player_number with
+  | None -> game
+  | Some player_num ->
+    (* If we are Player2, unswap to get canonical form (Player1 perspective) *)
+    if player_num = 2 then swap_players_in_game game else game
+;;
+
 let render_title_screen model set_model =
   let round = Game.current_round model.game in
   let top_dice =
@@ -879,8 +887,10 @@ let component =
           | Some gid when equal_game_mode model.game_mode OnlineMode ->
             (* Sync new round to Firebase *)
             let open Vdom.Effect.Let_syntax in
+            (* Save canonical game state (Player1 perspective) to Firebase *)
+            let canonical_game = get_canonical_game_state game' model.my_player_number in
             let%bind res =
-              Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+              Multiplayer.save_game_state_effect ~game_id:gid ~game_state:canonical_game
             in
             (match res with
              | Ok () ->
@@ -1002,10 +1012,14 @@ let component =
                      | Some gid ->
                        let open Vdom.Effect.Let_syntax in
                        let%bind _ = set_model { model with processing_move = true } in
+                       (* Save canonical game state (Player1 perspective) to Firebase *)
+                       let canonical_game =
+                         get_canonical_game_state new_game model.my_player_number
+                       in
                        let%bind res =
                          Multiplayer.save_game_state_effect
                            ~game_id:gid
-                           ~game_state:new_game
+                           ~game_state:canonical_game
                        in
                        (match res with
                         | Ok () ->
@@ -1035,8 +1049,14 @@ let component =
                      | Some gid ->
                        let open Vdom.Effect.Let_syntax in
                        let%bind _ = set_model { model with processing_move = true } in
+                       (* Save canonical game state (Player1 perspective) to Firebase *)
+                       let canonical_game =
+                         get_canonical_game_state game' model.my_player_number
+                       in
                        let%bind res =
-                         Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+                         Multiplayer.save_game_state_effect
+                           ~game_id:gid
+                           ~game_state:canonical_game
                        in
                        (match res with
                         | Ok () ->
