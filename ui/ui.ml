@@ -77,6 +77,33 @@ module Multiplayer = struct
         match state_res with
         | Error _ as e -> e
         | Ok maybe_state ->
+          let last_round_hands =
+            try
+              let h1_field = Js.Unsafe.get fields "last_p1_hand" in
+              let h2_field = Js.Unsafe.get fields "last_p2_hand" in
+              if
+                Js.Optdef.test (Js.Optdef.return h1_field)
+                && Js.Optdef.test (Js.Optdef.return h2_field)
+              then (
+                let h1_sv = Js.Unsafe.get h1_field "stringValue" in
+                let h2_sv = Js.Unsafe.get h2_field "stringValue" in
+                if
+                  Js.Optdef.test (Js.Optdef.return h1_sv)
+                  && Js.Optdef.test (Js.Optdef.return h2_sv)
+                then (
+                  let h1_s = Js.to_string h1_sv in
+                  let h2_s = Js.to_string h2_sv in
+                  try
+                    let h1 = Sexp.of_string h1_s |> Hand.t_of_sexp in
+                    let h2 = Sexp.of_string h2_s |> Hand.t_of_sexp in
+                    Some (h1, h2)
+                  with
+                  | _ -> None)
+                else None)
+              else None
+            with
+            | _ -> None
+          in
           let starter =
             try
               let starter_field = Js.Unsafe.get fields "starter" in
@@ -120,13 +147,18 @@ module Multiplayer = struct
             with
             | _ -> None
           in
-          Ok (Some (maybe_state, starter, player1, player2)))
+          Ok (Some (maybe_state, starter, player1, player2, last_round_hands)))
     with
     | exn -> Error (Printf.sprintf "Parse error: %s" (Exn.to_string exn))
   ;;
 
   let fetch_document_async ~game_id
-    : ( (Game.t option * int option * string option * string option) option
+    : ( (Game.t option
+        * int option
+        * string option
+        * string option
+        * (Hand.t * Hand.t) option)
+          option
         , string )
         Result.t
         Deferred.t
@@ -157,14 +189,30 @@ module Multiplayer = struct
     Bonsai_web.Effect.of_deferred_fun (fun () -> fetch_document_async ~game_id) ()
   ;;
 
-  let save_game_state_async ~game_id ~game_state : (unit, string) Result.t Deferred.t =
+  let save_game_state_async ~game_id ~game_state ~last_round_hands
+    : (unit, string) Result.t Deferred.t
+    =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
     xhr##_open (Js.string "PATCH") (Js.string (state_update_url game_id)) Js._true;
     xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
     let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
+    let hands_fields =
+      match last_round_hands with
+      | None -> ""
+      | Some (h1, h2) ->
+        let h1_sexp = Hand.sexp_of_t h1 |> Sexp.to_string |> String.escaped in
+        let h2_sexp = Hand.sexp_of_t h2 |> Sexp.to_string |> String.escaped in
+        Printf.sprintf
+          {|,"last_p1_hand":{"stringValue":"%s"},"last_p2_hand":{"stringValue":"%s"}|}
+          h1_sexp
+          h2_sexp
+    in
     let body =
-      Printf.sprintf {|{"fields":{"state":{"stringValue":"%s"}}}|} game_state_sexp
+      Printf.sprintf
+        {|{"fields":{"state":{"stringValue":"%s"}%s}}|}
+        game_state_sexp
+        hands_fields
     in
     xhr##.onreadystatechange
     := Js.wrap_callback (fun _ ->
@@ -179,9 +227,9 @@ module Multiplayer = struct
     Ivar.read ivar
   ;;
 
-  let save_game_state_effect ~game_id ~game_state =
+  let save_game_state_effect ~game_id ~game_state ~last_round_hands =
     Bonsai_web.Effect.of_deferred_fun
-      (fun () -> save_game_state_async ~game_id ~game_state)
+      (fun () -> save_game_state_async ~game_id ~game_state ~last_round_hands)
       ()
   ;;
 
@@ -771,7 +819,7 @@ let component =
               (match fetch_res with
                | Error _ -> Vdom.Effect.Ignore
                | Ok None -> Vdom.Effect.Ignore
-               | Ok (Some (maybe_state, starter, player1, player2)) ->
+               | Ok (Some (maybe_state, starter, player1, player2, fetched_hands)) ->
                  let game_state = Option.value_exn maybe_state in
                  let my_player_number =
                    match player1, player2 with
@@ -788,6 +836,7 @@ let component =
                    ; current_game_id = Some found_game_id
                    ; starter
                    ; my_player_number
+                   ; last_round_hands = fetched_hands
                    ; last_error = None
                    }))
           else (
@@ -811,7 +860,7 @@ let component =
                    { model with last_error = Some ("Fetch created game failed: " ^ msg) }
                | Ok None ->
                  set_model { model with last_error = Some "Created game not found" }
-               | Ok (Some (maybe_state, starter, player1, player2)) ->
+               | Ok (Some (maybe_state, starter, player1, player2, fetched_hands)) ->
                  let game_state = Option.value_exn maybe_state in
                  (* Determine which player we are based on player1/player2 *)
                  let my_player_number =
@@ -827,6 +876,7 @@ let component =
                    ; current_game_id = Some created_game_id
                    ; starter
                    ; my_player_number
+                   ; last_round_hands = fetched_hands
                    ; last_error = None
                    }))
     in
@@ -847,7 +897,7 @@ let component =
         (match fetch_res with
          | Error msg -> set_model { model with last_error = Some ("Sync failed: " ^ msg) }
          | Ok None -> set_model { model with last_error = Some "Game not found" }
-         | Ok (Some (maybe_state, starter, player1, player2)) ->
+         | Ok (Some (maybe_state, starter, player1, player2, fetched_hands)) ->
            let game_state = Option.value_exn maybe_state in
            (* Determine which player we are based on player1/player2 *)
            let my_player_number =
@@ -855,6 +905,12 @@ let component =
              | Some p1, _ when String.equal p1 model.client_id -> Some 1
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
+           in
+           (* Use fetched hands if round is cleared *)
+           let hands_to_use =
+             match Game.current_round game_state, fetched_hands with
+             | None, Some h -> Some h
+             | _ -> model.last_round_hands
            in
            (* Check if round just ended (round cleared but scores changed) *)
            let my_old_score = my_score model.game my_player_number in
@@ -896,6 +952,7 @@ let component =
              ; round_message
              ; round_justification
              ; round_end_ticks
+             ; last_round_hands = hands_to_use
              ; processing_move = false
              ; last_error = None
              })
@@ -933,7 +990,10 @@ let component =
               let open Vdom.Effect.Let_syntax in
               (* Game state is already canonical, save directly *)
               let%bind res =
-                Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+                Multiplayer.save_game_state_effect
+                  ~game_id:gid
+                  ~game_state:game'
+                  ~last_round_hands:None
               in
               match res with
               | Ok () ->
@@ -1092,6 +1152,7 @@ let component =
                          Multiplayer.save_game_state_effect
                            ~game_id:gid
                            ~game_state:new_game
+                           ~last_round_hands:None
                        in
                        (match res with
                         | Ok () ->
@@ -1135,6 +1196,7 @@ let component =
                          Multiplayer.save_game_state_effect
                            ~game_id:gid
                            ~game_state:game_cleared
+                           ~last_round_hands:saved_hands
                        in
                        (match res with
                         | Ok () ->
