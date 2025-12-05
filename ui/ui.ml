@@ -223,10 +223,12 @@ let component =
       ]
   in
   (* The view *)
+  (* Show opponent's dice when round has ended *)
+  let show_opponent_dice = Option.is_some model.round_message in
   Node.div
     [ Node.div
         ~attrs:[ Attr.class_ "game-container" ]
-        [ (* Opponent's hand (hidden) *)
+        [ (* Opponent's hand (hidden during play, visible after round ends) *)
           Node.div
             ~attrs:[ Attr.class_ "hand" ]
             [ Node.div
@@ -234,7 +236,7 @@ let component =
                 [ Node.text "Opponent (Player 2)" ]
             ; Node.div
                 ~attrs:[ Attr.class_ "dice-container" ]
-                (List.map p2_hand ~f:(render_die ~hidden:true))
+                (List.map p2_hand ~f:(render_die ~hidden:(not show_opponent_dice)))
             ]
         ; (* Game info section *)
           Node.div
