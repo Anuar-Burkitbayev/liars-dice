@@ -394,6 +394,7 @@ let component =
              [ Node.div
                  ~attrs:[ Attr.class_ "message-content" ]
                  [ Node.text msg
+                 ; Node.p [ Node.text "Play another?" ]
                  ; Node.div
                      ~attrs:[ Attr.class_ "mode-buttons" ]
                      [ Node.button
