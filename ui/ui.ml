@@ -1257,7 +1257,9 @@ let component =
               [ Node.text "Make Move" ]
           ]
       in
-      let show_opponent_dice = Option.is_some model.round_message in
+      let show_opponent_dice =
+        Option.is_some model.round_message || Option.is_some model.last_round_hands
+      in
       Node.div
         [ Node.div
             ~attrs:[ Attr.class_ "game-container" ]
@@ -1307,7 +1309,13 @@ let component =
                       | None -> Node.none
                       | Some just ->
                         Node.p
-                          ~attrs:[ Attr.style (Css_gen.margin_top (`Rem 0.5)) ]
+                          ~attrs:
+                            [ Attr.style
+                                (Css_gen.concat
+                                   [ Css_gen.margin_top (`Rem 0.5)
+                                   ; Css_gen.font_size (`Rem 0.9)
+                                   ])
+                            ]
                           [ Node.text just ])
                    ]
                ]
@@ -1323,6 +1331,18 @@ let component =
                [ Node.div
                    ~attrs:[ Attr.class_ "message-content" ]
                    [ Node.text msg
+                   ; (match model.round_justification with
+                      | None -> Node.none
+                      | Some just ->
+                        Node.p
+                          ~attrs:
+                            [ Attr.style
+                                (Css_gen.concat
+                                   [ Css_gen.margin_top (`Rem 0.5)
+                                   ; Css_gen.font_size (`Rem 0.9)
+                                   ])
+                            ]
+                          [ Node.text just ])
                    ; Node.p
                        ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ]
                        [ Node.text "Play another?" ]
@@ -1535,7 +1555,23 @@ let component =
          | Some msg, None ->
            Node.div
              ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
-             [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
+             [ Node.div
+                 ~attrs:[ Attr.class_ "message-content" ]
+                 [ Node.text msg
+                 ; (match model.round_justification with
+                    | None -> Node.none
+                    | Some just ->
+                      Node.p
+                        ~attrs:
+                          [ Attr.style
+                              (Css_gen.concat
+                                 [ Css_gen.margin_top (`Rem 0.5)
+                                 ; Css_gen.font_size (`Rem 0.9)
+                                 ])
+                          ]
+                        [ Node.text just ])
+                 ]
+             ]
          | _, Some winner ->
            (* In AI mode, player is always Player1 in local view *)
            let msg =
@@ -1548,6 +1584,18 @@ let component =
              [ Node.div
                  ~attrs:[ Attr.class_ "message-content" ]
                  [ Node.text msg
+                 ; (match model.round_justification with
+                    | None -> Node.none
+                    | Some just ->
+                      Node.p
+                        ~attrs:
+                          [ Attr.style
+                              (Css_gen.concat
+                                 [ Css_gen.margin_top (`Rem 0.5)
+                                 ; Css_gen.font_size (`Rem 0.9)
+                                 ])
+                          ]
+                        [ Node.text just ])
                  ; Node.p
                      ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ]
                      [ Node.text "Play another?" ]

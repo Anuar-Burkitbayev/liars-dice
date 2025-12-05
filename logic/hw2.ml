@@ -82,24 +82,14 @@ module Round = struct
     | Some bid ->
       let actual_count = total_count_of_value t bid.value in
       let prev_player = Player.opposite t.current_player in
-      let winner, message =
-        if actual_count >= bid.count
-        then
-          ( prev_player
-          , sprintf
-              "Not a lie! There %s %d %d%s"
-              (if actual_count = 1 then "is" else "are")
-              actual_count
-              bid.value
-              (if actual_count = 1 then "" else "s") )
-        else
-          ( t.current_player
-          , sprintf
-              "Caught in a lie! There %s only %d %d%s"
-              (if actual_count = 1 then "is" else "are")
-              actual_count
-              bid.value
-              (if actual_count = 1 then "" else "s") )
+      let winner = if actual_count >= bid.count then prev_player else t.current_player in
+      let message =
+        sprintf
+          "There %s %d %d%s."
+          (if actual_count = 1 then "was" else "were")
+          actual_count
+          bid.value
+          (if actual_count = 1 then "" else "s")
       in
       Ok (winner, message)
   ;;

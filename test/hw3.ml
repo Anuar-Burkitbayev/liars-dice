@@ -78,7 +78,7 @@ let%expect_test "Call liar when bid is true" =
   [%expect
     {|
     Player2
-    Caught in a lie! There is only 1 2 |}]
+    There was 1 2. |}]
 ;;
 
 let%expect_test "Call liar when bid is false" =
@@ -90,7 +90,7 @@ let%expect_test "Call liar when bid is false" =
   [%expect
     {|
     Player2
-    Caught in a lie! There is only 1 6 |}]
+    There was 1 6. |}]
 ;;
 
 (* Game Win Condition Tests *)
