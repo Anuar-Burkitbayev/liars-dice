@@ -535,6 +535,84 @@ module Multiplayer = struct
   ;;
 end
 
+module WebRTC = struct
+  (* JavaScript WebRTC bindings *)
+
+  let initialize_js =
+    Js.Unsafe.js_expr
+      "function(gameId, clientId, isInitiator) { return window.webrtc_initialize(gameId, \
+       clientId, isInitiator); }"
+  ;;
+
+  let toggle_video_js =
+    Js.Unsafe.js_expr "function(enabled) { return window.webrtc_toggle_video(enabled); }"
+  ;;
+
+  let toggle_audio_js =
+    Js.Unsafe.js_expr "function(enabled) { return window.webrtc_toggle_audio(enabled); }"
+  ;;
+
+  let close_js = Js.Unsafe.js_expr "function() { return window.webrtc_close(); }"
+
+  (* Initialize WebRTC connection *)
+  let initialize_async ~game_id ~client_id ~is_initiator
+    : (unit, string) Result.t Deferred.t
+    =
+    let ivar = Ivar.create () in
+    let promise =
+      Js.Unsafe.fun_call
+        initialize_js
+        [| Js.Unsafe.inject (Js.string game_id)
+         ; Js.Unsafe.inject (Js.string client_id)
+         ; Js.Unsafe.inject (Js.bool is_initiator)
+        |]
+    in
+    let promise = Js.Unsafe.coerce promise in
+    ignore
+      (promise##_then
+         (Js.wrap_callback (fun result ->
+            let success = Js.Unsafe.get result "success" in
+            if Js.to_bool success
+            then Ivar.fill ivar (Ok ())
+            else (
+              let error_opt = Js.Optdef.to_option (Js.Unsafe.get result "error") in
+              let error_msg =
+                match error_opt with
+                | Some err -> Js.to_string err
+                | None -> "Unknown WebRTC initialization error"
+              in
+              Ivar.fill ivar (Error error_msg));
+            Js.Unsafe.inject (Js.string "done"))));
+    Ivar.read ivar
+  ;;
+
+  let initialize_effect ~game_id ~client_id ~is_initiator =
+    Bonsai_web.Effect.of_deferred_fun
+      (fun () -> initialize_async ~game_id ~client_id ~is_initiator)
+      ()
+  ;;
+
+  (* Toggle video *)
+  let toggle_video ~enabled : bool =
+    let result =
+      Js.Unsafe.fun_call toggle_video_js [| Js.Unsafe.inject (Js.bool enabled) |]
+    in
+    Js.to_bool result
+  ;;
+
+  (* Toggle audio *)
+  let toggle_audio ~enabled : bool =
+    let result =
+      Js.Unsafe.fun_call toggle_audio_js [| Js.Unsafe.inject (Js.bool enabled) |]
+    in
+    Js.to_bool result
+  ;;
+
+  (* Close WebRTC connection *)
+  let close () : unit = ignore (Js.Unsafe.fun_call close_js [||])
+  let close_effect () = Effect.of_sync_fun close ()
+end
+
 let dice_face value =
   match value with
   | 1 -> "⚀"
@@ -578,6 +656,9 @@ type model =
   ; last_round_hands : (Hand.t * Hand.t) option
   ; last_error : string option
   ; round_justification : string option
+  ; webrtc_enabled : bool
+  ; video_enabled : bool
+  ; audio_enabled : bool
   }
 [@@deriving sexp]
 
@@ -598,6 +679,9 @@ let model_init () : model =
   ; last_round_hands = None
   ; last_error = None
   ; round_justification = None
+  ; webrtc_enabled = false
+  ; video_enabled = true
+  ; audio_enabled = true
   }
 ;;
 
@@ -840,16 +924,39 @@ let component =
                  in
                  (* Clear ourselves from the queue since we found a match *)
                  let%bind _ = Multiplayer.clear_queue_effect () in
-                 set_model
-                   { model with
-                     game = game_state
-                   ; waiting_in_queue = false
-                   ; current_game_id = Some found_game_id
-                   ; starter
-                   ; my_player_number
-                   ; last_round_hands = fetched_hands
-                   ; last_error = None
-                   }))
+                 (* Initialize WebRTC - we are player 1 (waiter), not the initiator of WebRTC offer *)
+                 let%bind webrtc_res =
+                   WebRTC.initialize_effect
+                     ~game_id:found_game_id
+                     ~client_id:model.client_id
+                     ~is_initiator:false
+                 in
+                 (match webrtc_res with
+                  | Ok () ->
+                    set_model
+                      { model with
+                        game = game_state
+                      ; waiting_in_queue = false
+                      ; current_game_id = Some found_game_id
+                      ; starter
+                      ; my_player_number
+                      ; last_round_hands = fetched_hands
+                      ; last_error = None
+                      ; webrtc_enabled = true
+                      }
+                  | Error err ->
+                    (* Still allow game to start even if WebRTC fails *)
+                    set_model
+                      { model with
+                        game = game_state
+                      ; waiting_in_queue = false
+                      ; current_game_id = Some found_game_id
+                      ; starter
+                      ; my_player_number
+                      ; last_round_hands = fetched_hands
+                      ; last_error = Some ("WebRTC init failed: " ^ err)
+                      ; webrtc_enabled = false
+                      })))
           else (
             let%bind match_res =
               Multiplayer.attempt_match_and_create_game_effect
@@ -880,16 +987,39 @@ let component =
                    | _, Some p2 when String.equal p2 model.client_id -> Some 2
                    | _ -> None
                  in
-                 set_model
-                   { model with
-                     game = game_state
-                   ; waiting_in_queue = false
-                   ; current_game_id = Some created_game_id
-                   ; starter
-                   ; my_player_number
-                   ; last_round_hands = fetched_hands
-                   ; last_error = None
-                   }))
+                 (* Initialize WebRTC - we are player 2 (matcher), the initiator of WebRTC offer *)
+                 let%bind webrtc_res =
+                   WebRTC.initialize_effect
+                     ~game_id:created_game_id
+                     ~client_id:model.client_id
+                     ~is_initiator:true
+                 in
+                 (match webrtc_res with
+                  | Ok () ->
+                    set_model
+                      { model with
+                        game = game_state
+                      ; waiting_in_queue = false
+                      ; current_game_id = Some created_game_id
+                      ; starter
+                      ; my_player_number
+                      ; last_round_hands = fetched_hands
+                      ; last_error = None
+                      ; webrtc_enabled = true
+                      }
+                  | Error err ->
+                    (* Still allow game to start even if WebRTC fails *)
+                    set_model
+                      { model with
+                        game = game_state
+                      ; waiting_in_queue = false
+                      ; current_game_id = Some created_game_id
+                      ; starter
+                      ; my_player_number
+                      ; last_round_hands = fetched_hands
+                      ; last_error = Some ("WebRTC init failed: " ^ err)
+                      ; webrtc_enabled = false
+                      })))
     in
     Bonsai.Clock.every
       ~when_to_start_next_effect:`Every_multiple_of_period_blocking
@@ -1304,6 +1434,39 @@ let component =
                 ; Node.p
                     ~attrs:[ Attr.id "bid-info" ]
                     [ Node.text (bid_to_string current_bid) ]
+                ; (if model.webrtc_enabled
+                   then
+                     Node.div
+                       ~attrs:
+                         [ Attr.style
+                             (Css_gen.concat
+                                [ Css_gen.font_size (`Rem 0.75)
+                                ; Css_gen.color (`Name "lightgreen")
+                                ; Css_gen.margin_top (`Rem 0.25)
+                                ])
+                         ; Attr.class_ "webrtc-controls"
+                         ]
+                       [ Node.span [ Node.text "🎥 Video Chat Active" ]
+                       ; Node.button
+                           ~attrs:
+                             [ Attr.class_ "btn btn-small"
+                             ; Attr.on_click (fun _ ->
+                                 let new_video = not model.video_enabled in
+                                 let _ = WebRTC.toggle_video ~enabled:new_video in
+                                 set_model { model with video_enabled = new_video })
+                             ]
+                           [ Node.text (if model.video_enabled then "📹" else "📹❌") ]
+                       ; Node.button
+                           ~attrs:
+                             [ Attr.class_ "btn btn-small"
+                             ; Attr.on_click (fun _ ->
+                                 let new_audio = not model.audio_enabled in
+                                 let _ = WebRTC.toggle_audio ~enabled:new_audio in
+                                 set_model { model with audio_enabled = new_audio })
+                             ]
+                           [ Node.text (if model.audio_enabled then "🎤" else "🎤❌") ]
+                       ]
+                   else Node.none)
                 ]
             ; Node.div
                 ~attrs:[ Attr.class_ "hand player-hand" ]
@@ -1376,12 +1539,23 @@ let component =
                                    let%bind _ =
                                      Multiplayer.delete_game_effect ~game_id:gid
                                    in
+                                   let%bind _ =
+                                     if model.webrtc_enabled
+                                     then WebRTC.close_effect ()
+                                     else Effect.return ()
+                                   in
                                    set_model
                                      { (model_init ()) with
                                        game_mode = AIMode
                                      ; game = Game.init ~dice_per_player:5
                                      }
                                  | None ->
+                                   let open Vdom.Effect.Let_syntax in
+                                   let%bind _ =
+                                     if model.webrtc_enabled
+                                     then WebRTC.close_effect ()
+                                     else Effect.return ()
+                                   in
                                    set_model
                                      { (model_init ()) with
                                        game_mode = AIMode
@@ -1400,12 +1574,23 @@ let component =
                                    let%bind _ =
                                      Multiplayer.delete_game_effect ~game_id:gid
                                    in
+                                   let%bind _ =
+                                     if model.webrtc_enabled
+                                     then WebRTC.close_effect ()
+                                     else Effect.return ()
+                                   in
                                    set_model
                                      { (model_init ()) with
                                        game_mode = OnlineMode
                                      ; waiting_in_queue = true
                                      }
                                  | None ->
+                                   let open Vdom.Effect.Let_syntax in
+                                   let%bind _ =
+                                     if model.webrtc_enabled
+                                     then WebRTC.close_effect ()
+                                     else Effect.return ()
+                                   in
                                    set_model
                                      { (model_init ()) with
                                        game_mode = OnlineMode

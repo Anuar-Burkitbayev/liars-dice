@@ -8,11 +8,28 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <link rel="stylesheet" type="text/css" href="hw5/hw5.css">
     <link rel="icon" href="data:,">
+    <script defer src="webrtc.js"></script>
     <script defer src="generated_js/ui.bc.js"></script>
 </head>
 
 <body>
     <div id="app"></div>
+    
+    <!-- WebRTC Video Elements -->
+    <div id="video-container" style="display: none;">
+        <div id="local-video-wrapper">
+            <video id="localVideo" autoplay playsinline muted></video>
+            <div class="video-label">You</div>
+        </div>
+        <div id="remote-video-wrapper">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div class="video-label">Opponent</div>
+        </div>
+        <div id="video-controls">
+            <button id="toggleVideo" class="video-btn" title="Toggle Video">📹</button>
+            <button id="toggleAudio" class="video-btn" title="Toggle Audio">🎤</button>
+        </div>
+    </div>
 </body>
 
 </html>
