@@ -44,6 +44,7 @@ type model =
   ; ai_thinking : bool (* Track if AI is about to move *)
   ; round_end_ticks : int (* Count ticks since round ended (0 = not ended) *)
   ; game_mode : game_mode
+  ; title_screen_ticks : int (* Count ticks for title screen animations *)
   }
 [@@deriving sexp]
 
@@ -54,6 +55,7 @@ let model_init () : model =
   ; ai_thinking = false
   ; round_end_ticks = 0
   ; game_mode = TitleScreen
+  ; title_screen_ticks = 0
   }
 ;;
 
@@ -123,35 +125,51 @@ let execute_ai_move (m : model) : model =
 
 (* Render title screen *)
 let render_title_screen model set_model =
+  let round = Game.current_round model.game in
+  let top_dice =
+    Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player1)
+  in
+  let bottom_dice =
+    Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player2)
+  in
   Node.div
     ~attrs:[ Attr.class_ "title-screen" ]
     [ Node.div
-        ~attrs:[ Attr.class_ "title-container" ]
-        [ Node.h1 ~attrs:[ Attr.class_ "title" ] [ Node.text "Liar's Dice" ]
-        ; Node.div
-            ~attrs:[ Attr.class_ "dice-display" ]
-            [ render_die 1
-            ; render_die 2
-            ; render_die 3
-            ; render_die 4
-            ; render_die 5
-            ; render_die 6
+        ~attrs:[ Attr.class_ "game-container" ]
+        [ (* Top dice set *)
+          Node.div
+            ~attrs:[ Attr.class_ "hand" ]
+            [ Node.div
+                ~attrs:[ Attr.class_ "dice-container" ]
+                (List.map top_dice ~f:render_die)
             ]
-        ; Node.div
-            ~attrs:[ Attr.class_ "mode-buttons" ]
-            [ Node.button
-                ~attrs:
-                  [ Attr.class_ "btn btn-mode"
-                  ; Attr.on_click (fun _ev ->
-                      set_model { model with game_mode = AIMode; game = Game.init ~dice_per_player:5 })
-                  ]
-                [ Node.text "AI" ]
-            ; Node.button
-                ~attrs:
-                  [ Attr.class_ "btn btn-mode btn-disabled"
-                  ; Attr.bool_property "disabled" true
-                  ]
-                [ Node.text "Online" ]
+        ; (* Title and buttons in center *)
+          Node.div
+            ~attrs:[ Attr.class_ "game-info title-info" ]
+            [ Node.h1 [ Node.text "Liar's Dice" ]
+            ; Node.div
+                ~attrs:[ Attr.class_ "mode-buttons" ]
+                [ Node.button
+                    ~attrs:
+                      [ Attr.class_ "btn btn-mode"
+                      ; Attr.on_click (fun _ev ->
+                          set_model { model with game_mode = AIMode; game = Game.init ~dice_per_player:5 })
+                      ]
+                    [ Node.text "AI" ]
+                ; Node.button
+                    ~attrs:
+                      [ Attr.class_ "btn btn-mode btn-disabled"
+                      ; Attr.bool_property "disabled" true
+                      ]
+                    [ Node.text "Online" ]
+                ]
+            ]
+        ; (* Bottom dice set *)
+          Node.div
+            ~attrs:[ Attr.class_ "hand" ]
+            [ Node.div
+                ~attrs:[ Attr.class_ "dice-container" ]
+                (List.map bottom_dice ~f:render_die)
             ]
         ]
     ]
@@ -174,8 +192,18 @@ let component =
     let callback =
       let%map model = model
       and set_model = set_model in
+      (* Handle title screen animations *)
+      if equal_game_mode model.game_mode TitleScreen
+      then
+        let new_ticks = model.title_screen_ticks + 1 in
+        if new_ticks mod 2 = 0
+        then
+          (* Update dice every 2 ticks *)
+          set_model { model with title_screen_ticks = new_ticks; game = Game.init ~dice_per_player:5 }
+        else
+          set_model { model with title_screen_ticks = new_ticks }
       (* Check for automatic round progression *)
-      if model.round_end_ticks > 0 && Option.is_none (Game.get_winner model.game)
+      else if model.round_end_ticks > 0 && Option.is_none (Game.get_winner model.game)
       then
         if model.round_end_ticks >= 8 (* 8 ticks * 0.5s = 4 seconds *)
         then
