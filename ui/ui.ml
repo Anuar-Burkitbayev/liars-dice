@@ -94,13 +94,26 @@ module Multiplayer = struct
             with
             | _ -> None
           in
-          Ok (Some (maybe_state, starter)))
+          let waiter_client_id =
+            try
+              let waiter_field = Js.Unsafe.get fields "waiter_client_id" in
+              if Js.Optdef.test (Js.Optdef.return waiter_field)
+              then (
+                let sv = Js.Unsafe.get waiter_field "stringValue" in
+                if Js.Optdef.test (Js.Optdef.return sv)
+                then Some (Js.to_string sv)
+                else None)
+              else None
+            with
+            | _ -> None
+          in
+          Ok (Some (maybe_state, starter, waiter_client_id)))
     with
     | exn -> Error (Printf.sprintf "Parse error: %s" (Exn.to_string exn))
   ;;
 
   let fetch_document_async ~game_id
-    : ((Game.t option * int option) option, string) Result.t Deferred.t
+    : ((Game.t option * int option * string option) option, string) Result.t Deferred.t
     =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
@@ -156,7 +169,8 @@ module Multiplayer = struct
       ()
   ;;
 
-  let create_game_async ~game_id ~game_state ~starter : (unit, string) Result.t Deferred.t
+  let create_game_async ~game_id ~game_state ~starter ~waiter_client_id
+    : (unit, string) Result.t Deferred.t
     =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
@@ -168,9 +182,10 @@ module Multiplayer = struct
     let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
     let body =
       Printf.sprintf
-        "{\"fields\":{\"state\":{\"stringValue\":\"%s\"},\"starter\":{\"integerValue\":\"%d\"}}}"
+        "{\"fields\":{\"state\":{\"stringValue\":\"%s\"},\"starter\":{\"integerValue\":\"%d\"},\"waiter_client_id\":{\"stringValue\":\"%s\"}}}"
         game_state_sexp
         starter
+        (String.escaped waiter_client_id)
     in
     xhr##.onreadystatechange
     := Js.wrap_callback (fun _ ->
@@ -326,11 +341,16 @@ module Multiplayer = struct
         Ivar.read ivar)
       else (
         let created_game_id = generate_game_id () in
-        let starter = if Random.bool () then 1 else 2 in
+        (* The waiter is Player1, the matcher (current client) is Player2 *)
+        let starter = 1 in
         let initial_game = Game.init ~dice_per_player:5 in
         let open Async_kernel.Deferred.Let_syntax in
         let%bind result =
-          create_game_async ~game_id:created_game_id ~game_state:initial_game ~starter
+          create_game_async
+            ~game_id:created_game_id
+            ~game_state:initial_game
+            ~starter
+            ~waiter_client_id:waiter_id
         in
         Ivar.fill
           ivar
@@ -385,6 +405,7 @@ type model =
   ; waiting_in_queue : bool
   ; current_game_id : string option
   ; starter : int option
+  ; my_player_number : int option
   ; last_error : string option
   }
 [@@deriving sexp]
@@ -401,6 +422,7 @@ let model_init () : model =
   ; waiting_in_queue = false
   ; current_game_id = None
   ; starter = None
+  ; my_player_number = None
   ; last_error = None
   }
 ;;
@@ -469,8 +491,35 @@ let execute_ai_move (m : model) : model =
         | Error _ -> { m with ai_thinking = false }))
 ;;
 
-let maybe_rotate_game_for_starter (game : Game.t) (_starter_opt : int option) : Game.t =
-  game
+let swap_players_in_game (game : Game.t) : Game.t =
+  match game.current_round with
+  | None -> game
+  | Some round ->
+    let swapped_hands =
+      List.map round.hands ~f:(fun (player, hand) -> Player.opposite player, hand)
+    in
+    let swapped_current_player = Player.opposite round.current_player in
+    let swapped_round =
+      { round with hands = swapped_hands; current_player = swapped_current_player }
+    in
+    let swapped_rounds_won =
+      List.map game.rounds_won ~f:(fun (player, wins) -> Player.opposite player, wins)
+    in
+    let swapped_game_winner = Option.map game.game_winner ~f:Player.opposite in
+    { game with
+      current_round = Some swapped_round
+    ; rounds_won = swapped_rounds_won
+    ; game_winner = swapped_game_winner
+    }
+;;
+
+let maybe_rotate_game_for_starter (game : Game.t) (my_player_number : int option) : Game.t
+  =
+  match my_player_number with
+  | None -> game
+  | Some player_num ->
+    (* If we are Player2, we need to swap the game perspective *)
+    if player_num = 2 then swap_players_in_game game else game
 ;;
 
 let render_title_screen model set_model =
@@ -588,15 +637,25 @@ let component =
                    { model with last_error = Some ("Fetch created game failed: " ^ msg) }
                | Ok None ->
                  set_model { model with last_error = Some "Created game not found" }
-               | Ok (Some (maybe_state, starter)) ->
+               | Ok (Some (maybe_state, starter, waiter_client_id)) ->
                  let game_state = Option.value_exn maybe_state in
-                 let rotated = maybe_rotate_game_for_starter game_state starter in
+                 (* Determine which player we are based on waiter_client_id *)
+                 let my_player_number =
+                   match waiter_client_id with
+                   | Some wid ->
+                     if String.equal wid model.client_id then Some 1 else Some 2
+                   | None -> None
+                 in
+                 let rotated =
+                   maybe_rotate_game_for_starter game_state my_player_number
+                 in
                  set_model
                    { model with
                      game = rotated
                    ; waiting_in_queue = false
                    ; current_game_id = Some created_game_id
                    ; starter
+                   ; my_player_number
                    ; last_error = None
                    }))
     in
@@ -617,10 +676,17 @@ let component =
         (match fetch_res with
          | Error msg -> set_model { model with last_error = Some ("Sync failed: " ^ msg) }
          | Ok None -> set_model { model with last_error = Some "Game not found" }
-         | Ok (Some (maybe_state, starter)) ->
+         | Ok (Some (maybe_state, starter, waiter_client_id)) ->
            let game_state = Option.value_exn maybe_state in
-           let rotated = maybe_rotate_game_for_starter game_state starter in
-           set_model { model with game = rotated; starter; last_error = None })
+           (* Determine which player we are based on waiter_client_id *)
+           let my_player_number =
+             match waiter_client_id with
+             | Some wid -> if String.equal wid model.client_id then Some 1 else Some 2
+             | None -> model.my_player_number
+           in
+           let rotated = maybe_rotate_game_for_starter game_state my_player_number in
+           set_model
+             { model with game = rotated; starter; my_player_number; last_error = None })
     in
     Bonsai.Clock.every
       ~when_to_start_next_effect:`Every_multiple_of_period_blocking
