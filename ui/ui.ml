@@ -35,6 +35,7 @@ type model =
   { game : Game.t
   ; round_message : string option
   ; selected_move_index : int
+  ; ai_thinking : bool (* Track if AI is about to move *)
   }
 [@@deriving sexp]
 
@@ -42,6 +43,7 @@ let model_init () : model =
   { game = Game.init ~dice_per_player:5
   ; round_message = None
   ; selected_move_index = 0
+  ; ai_thinking = false
   }
 ;;
 
@@ -55,49 +57,56 @@ let move_to_string = function
   | `CallLiar -> "Call Liar"
 ;;
 
-let run_ai_until_human (m : model) : model =
-  let rec loop m =
-    match Game.get_winner m.game, Game.current_round m.game with
-    | Some _, _ -> m
-    | _, None -> m
-    | None, Some round ->
-      (match Round.get_current_player round with
-       | Player.Player1 -> m
-       | Player.Player2 ->
-         (match get_logical_move round with
-          | `Bid b ->
-            (match Round.make_bid round b with
-             | Ok new_round ->
-               loop { m with game = { m.game with current_round = Some new_round } }
-             | Error _ ->
-               (* If AI produced invalid bid (shouldn't happen), call liar *)
-               (match Round.call_liar round with
-                | Ok (winner, _) ->
-                  let game' = Game.apply_round_result m.game winner in
-                  { m with
-                    game = game'
-                  ; round_message =
-                      Some
-                        (if Player.equal winner Player.Player1
-                         then "You won the round!"
-                         else "You lost the round!")
-                  }
-                | Error _ -> m))
-          | `CallLiar ->
-            (match Round.call_liar round with
-             | Ok (winner, _) ->
-               let game' = Game.apply_round_result m.game winner in
-               { m with
-                 game = game'
-               ; round_message =
-                   Some
-                     (if Player.equal winner Player.Player1
-                      then "You won the round!"
-                      else "You lost the round!")
-               }
-             | Error _ -> m)))
-  in
-  loop m
+(* Check if it's AI's turn *)
+let is_ai_turn (m : model) : bool =
+  match Game.get_winner m.game, Game.current_round m.game with
+  | Some _, _ -> false
+  | _, None -> false
+  | None, Some round ->
+    (match Round.get_current_player round with
+     | Player.Player1 -> false
+     | Player.Player2 -> true)
+;;
+
+(* Execute a single AI move *)
+let execute_ai_move (m : model) : model =
+  match Game.current_round m.game with
+  | None -> m
+  | Some round ->
+    (match get_logical_move round with
+     | `Bid b ->
+       (match Round.make_bid round b with
+        | Ok new_round ->
+          { m with game = { m.game with current_round = Some new_round }; ai_thinking = false }
+        | Error _ ->
+          (* If AI produced invalid bid (shouldn't happen), call liar *)
+          (match Round.call_liar round with
+           | Ok (winner, _) ->
+             let game' = Game.apply_round_result m.game winner in
+             { m with
+               game = game'
+             ; round_message =
+                 Some
+                   (if Player.equal winner Player.Player1
+                    then "You won the round!"
+                    else "You lost the round!")
+             ; ai_thinking = false
+             }
+           | Error _ -> { m with ai_thinking = false }))
+     | `CallLiar ->
+       (match Round.call_liar round with
+        | Ok (winner, _) ->
+          let game' = Game.apply_round_result m.game winner in
+          { m with
+            game = game'
+          ; round_message =
+              Some
+                (if Player.equal winner Player.Player1
+                 then "You won the round!"
+                 else "You lost the round!")
+          ; ai_thinking = false
+          }
+        | Error _ -> { m with ai_thinking = false }))
 ;;
 
 (* Create the main UI component *)
@@ -111,6 +120,27 @@ let component =
     end
     in
     Bonsai.state (module M) ~default_model:(model_init ())
+  in
+  (* Set up a clock to check for AI moves periodically *)
+  let%sub () =
+    let callback =
+      let%map model = model
+      and set_model = set_model in
+      if is_ai_turn model && not model.ai_thinking
+      then
+        (* Mark AI as thinking and schedule the move *)
+        set_model { model with ai_thinking = true }
+      else if model.ai_thinking
+      then
+        (* Execute the AI move after delay *)
+        let new_model = execute_ai_move model in
+        set_model new_model
+      else Effect.Ignore
+    in
+    Bonsai.Clock.every
+      ~when_to_start_next_effect:`Every_multiple_of_period_blocking
+      (Time_ns.Span.of_sec 1.5)
+      callback
   in
   let%arr model = model
   and set_model = set_model in
@@ -168,11 +198,9 @@ let component =
             (match Round.make_bid round bid with
              | Error _ -> Effect.Ignore
              | Ok new_round ->
-               let m' =
-                 { model with game = { game with current_round = Some new_round } }
-               in
-               let m'' = run_ai_until_human m' in
-               set_model m'')
+               (* Update game state, AI will move on next clock tick *)
+               set_model
+                 { model with game = { game with current_round = Some new_round } })
           | Some `CallLiar ->
             (match Round.call_liar round with
              | Error _ -> Effect.Ignore
@@ -192,10 +220,8 @@ let component =
       | None ->
         (* Start a new round *)
         let game' = Game.next_round_if_possible game in
-        let m' = { model with game = game'; round_message = None } in
-        (* If AI somehow starts, let it move *)
-        let m'' = run_ai_until_human m' in
-        set_model m'')
+        (* AI will move on next clock tick if needed *)
+        set_model { model with game = game'; round_message = None })
   in
   (* Dropdown for valid moves *)
   let move_controls =
