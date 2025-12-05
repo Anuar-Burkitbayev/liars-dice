@@ -3,12 +3,350 @@ open Logic_library
 open Hw2
 open Hw4
 open Virtual_dom
+open Js_of_ocaml
+open Async_kernel
 open! Bonsai.Let_syntax
 module Node = Vdom.Node
 module Attr = Vdom.Attr
 module Effect = Vdom.Effect
 
-(* Helper function to get dice face Unicode *)
+module Multiplayer = struct
+  let firebase_api_key = "AIzaSyDzpJvn3EOxsm9EZPpNwaRDIrEXdsEGp7I"
+  let project_id = "liars-dice-3fd4e"
+
+  let base_url =
+    Printf.sprintf
+      "https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents"
+      project_id
+  ;;
+
+  let game_document_path game_id = Printf.sprintf "games/%s" game_id
+
+  let game_document_url game_id =
+    Printf.sprintf "%s/%s?key=%s" base_url (game_document_path game_id) firebase_api_key
+  ;;
+
+  let state_update_url game_id =
+    Printf.sprintf
+      "%s/%s?updateMask.fieldPaths=state&key=%s"
+      base_url
+      (game_document_path game_id)
+      firebase_api_key
+  ;;
+
+  let queue_document_path = "matchmaking/waiting"
+
+  let queue_document_url () =
+    Printf.sprintf "%s/%s?key=%s" base_url queue_document_path firebase_api_key
+  ;;
+
+  let generate_game_id () =
+    Random.self_init ();
+    let timestamp = int_of_float (Js.to_float (new%js Js.date_now)##getTime) in
+    let random_suffix = Random.int 10_000 in
+    Printf.sprintf "%d-%04d" timestamp random_suffix
+  ;;
+
+  let generate_client_id () =
+    Random.self_init ();
+    let alphabet = "abcdefghijklmnopqrstuvwxyz0123456789" in
+    String.init 16 ~f:(fun _ -> alphabet.[Random.int (String.length alphabet)])
+  ;;
+
+  let parse_document response_text =
+    try
+      let json = Js.Unsafe.global##._JSON##parse response_text in
+      let fields = Js.Unsafe.get json "fields" in
+      if not (Js.Optdef.test (Js.Optdef.return fields))
+      then Ok None
+      else (
+        let state_field = Js.Unsafe.get fields "state" in
+        let state_res =
+          if Js.Optdef.test (Js.Optdef.return state_field)
+          then (
+            let sv = Js.Unsafe.get state_field "stringValue" in
+            if Js.Optdef.test (Js.Optdef.return sv)
+            then (
+              let s = Js.to_string sv in
+              try Ok (Some (Sexp.of_string s |> Game.t_of_sexp)) with
+              | exn ->
+                Error (Printf.sprintf "Parse game sexp failed: %s" (Exn.to_string exn)))
+            else Ok None)
+          else Ok None
+        in
+        match state_res with
+        | Error _ as e -> e
+        | Ok maybe_state ->
+          let starter =
+            try
+              let starter_field = Js.Unsafe.get fields "starter" in
+              if Js.Optdef.test (Js.Optdef.return starter_field)
+              then (
+                let iv = Js.Unsafe.get starter_field "integerValue" in
+                if Js.Optdef.test (Js.Optdef.return iv)
+                then (
+                  let s = Js.to_string iv in
+                  match Int.of_string_opt s with
+                  | Some i -> Some i
+                  | None -> None)
+                else None)
+              else None
+            with
+            | _ -> None
+          in
+          Ok (Some (maybe_state, starter)))
+    with
+    | exn -> Error (Printf.sprintf "Parse error: %s" (Exn.to_string exn))
+  ;;
+
+  let fetch_document_async ~game_id
+    : ((Game.t option * int option) option, string) Result.t Deferred.t
+    =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "GET") (Js.string (game_document_url game_id)) Js._true;
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status = 404
+           then Ivar.fill ivar (Ok None)
+           else if status >= 200 && status < 300
+           then (
+             let resp = Js.Opt.case xhr##.responseText (fun () -> "{}") Js.to_string in
+             match parse_document (Js.string resp) with
+             | Ok parsed -> Ivar.fill ivar (Ok parsed)
+             | Error msg -> Ivar.fill ivar (Error msg))
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to fetch game: %d" status))
+         | _ -> ());
+    ignore (xhr##send Js.null);
+    Ivar.read ivar
+  ;;
+
+  let fetch_document_effect ~game_id =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> fetch_document_async ~game_id) ()
+  ;;
+
+  let save_game_state_async ~game_id ~game_state : (unit, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "PATCH") (Js.string (state_update_url game_id)) Js._true;
+    xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
+    let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
+    let body =
+      Printf.sprintf {|{"fields":{"state":{"stringValue":"%s"}}}|} game_state_sexp
+    in
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status >= 200 && status < 300
+           then Ivar.fill ivar (Ok ())
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to save state: %d" status))
+         | _ -> ());
+    ignore (xhr##send (Js.Opt.return (Js.string body)));
+    Ivar.read ivar
+  ;;
+
+  let save_game_state_effect ~game_id ~game_state =
+    Bonsai_web.Effect.of_deferred_fun
+      (fun () -> save_game_state_async ~game_id ~game_state)
+      ()
+  ;;
+
+  let create_game_async ~game_id ~game_state ~starter : (unit, string) Result.t Deferred.t
+    =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    let url =
+      Printf.sprintf "%s/games?documentId=%s&key=%s" base_url game_id firebase_api_key
+    in
+    xhr##_open (Js.string "POST") (Js.string url) Js._true;
+    xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
+    let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
+    let body =
+      Printf.sprintf
+        "{\"fields\":{\"state\":{\"stringValue\":\"%s\"},\"starter\":{\"integerValue\":\"%d\"}}}"
+        game_state_sexp
+        starter
+    in
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           let response_text =
+             Js.Opt.case xhr##.responseText (fun () -> "") Js.to_string
+           in
+           if status >= 200 && status < 300
+           then Ivar.fill ivar (Ok ())
+           else
+             Ivar.fill
+               ivar
+               (Error
+                  (Printf.sprintf
+                     "Failed to create game: %d. Resp: %s"
+                     status
+                     response_text))
+         | _ -> ());
+    ignore (xhr##send (Js.Opt.return (Js.string body)));
+    Ivar.read ivar
+  ;;
+
+  type queue_entry =
+    { client_id : string
+    ; ts : int
+    }
+
+  let parse_queue_response response_text : (queue_entry option, string) result =
+    try
+      let json = Js.Unsafe.global##._JSON##parse response_text in
+      let fields = Js.Unsafe.get json "fields" in
+      if not (Js.Optdef.test (Js.Optdef.return fields))
+      then Ok None
+      else (
+        let waiter = Js.Unsafe.get fields "waiter" in
+        if not (Js.Optdef.test (Js.Optdef.return waiter))
+        then Ok None
+        else (
+          let mapv = Js.Unsafe.get waiter "mapValue" in
+          let wf = Js.Unsafe.get mapv "fields" in
+          let cid = Js.Unsafe.get wf "client_id" in
+          let ts = Js.Unsafe.get wf "ts" in
+          if not (Js.Optdef.test (Js.Optdef.return cid))
+          then Ok None
+          else if not (Js.Optdef.test (Js.Optdef.return ts))
+          then Ok None
+          else (
+            let client = Js.to_string (Js.Unsafe.get cid "stringValue") in
+            let ts_s = Js.to_string (Js.Unsafe.get ts "integerValue") in
+            match Int.of_string_opt ts_s with
+            | None -> Ok None
+            | Some i -> Ok (Some { client_id = client; ts = i }))))
+    with
+    | exn -> Error (Printf.sprintf "Parse queue error: %s" (Exn.to_string exn))
+  ;;
+
+  let fetch_queue_async () : (queue_entry option, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "GET") (Js.string (queue_document_url ())) Js._true;
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status = 404
+           then Ivar.fill ivar (Ok None)
+           else if status >= 200 && status < 300
+           then (
+             let resp = Js.Opt.case xhr##.responseText (fun () -> "{}") Js.to_string in
+             match parse_queue_response (Js.string resp) with
+             | Ok q -> Ivar.fill ivar (Ok q)
+             | Error msg -> Ivar.fill ivar (Error msg))
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to fetch queue: %d" status))
+         | _ -> ());
+    ignore (xhr##send Js.null);
+    Ivar.read ivar
+  ;;
+
+  let fetch_queue_effect () =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> fetch_queue_async ()) ()
+  ;;
+
+  let set_queue_waiter_async ~client_id : (unit, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "PATCH") (Js.string (queue_document_url ())) Js._true;
+    xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
+    let ts = int_of_float (Js.to_float (new%js Js.date_now)##getTime) in
+    let body =
+      Printf.sprintf
+        {|{"fields":{"waiter":{"mapValue":{"fields":{"client_id":{"stringValue":"%s"},"ts":{"integerValue":"%d"}}}}}}|}
+        (String.escaped client_id)
+        ts
+    in
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status >= 200 && status < 300
+           then Ivar.fill ivar (Ok ())
+           else
+             Ivar.fill
+               ivar
+               (Error (Printf.sprintf "Failed to set queue waiter: %d" status))
+         | _ -> ());
+    ignore (xhr##send (Js.Opt.return (Js.string body)));
+    Ivar.read ivar
+  ;;
+
+  let set_queue_waiter_effect ~client_id =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> set_queue_waiter_async ~client_id) ()
+  ;;
+
+  let clear_queue_async () : (unit, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    xhr##_open (Js.string "PATCH") (Js.string (queue_document_url ())) Js._true;
+    xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
+    let body = {|{"fields":{}}|} in
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status >= 200 && status < 300
+           then Ivar.fill ivar (Ok ())
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to clear queue: %d" status))
+         | _ -> ());
+    ignore (xhr##send (Js.Opt.return (Js.string body)));
+    Ivar.read ivar
+  ;;
+
+  let clear_queue_effect () =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> clear_queue_async ()) ()
+  ;;
+
+  let attempt_match_and_create_game_async ~client_id ~(maybe_waiter : queue_entry option)
+    : (string option, string) Result.t Deferred.t
+    =
+    let ivar = Ivar.create () in
+    match maybe_waiter with
+    | None ->
+      Ivar.fill ivar (Ok None);
+      Ivar.read ivar
+    | Some { client_id = waiter_id; ts = _ } ->
+      if String.equal waiter_id client_id
+      then (
+        Ivar.fill ivar (Ok None);
+        Ivar.read ivar)
+      else (
+        let created_game_id = generate_game_id () in
+        let starter = if Random.bool () then 1 else 2 in
+        let initial_game = Game.init ~dice_per_player:5 in
+        let open Async_kernel.Deferred.Let_syntax in
+        let%bind result =
+          create_game_async ~game_id:created_game_id ~game_state:initial_game ~starter
+        in
+        Ivar.fill
+          ivar
+          (match result with
+           | Ok () -> Ok (Some created_game_id)
+           | Error msg -> Error msg);
+        Ivar.read ivar)
+  ;;
+
+  let attempt_match_and_create_game_effect ~client_id ~maybe_waiter =
+    Bonsai_web.Effect.of_deferred_fun
+      (fun () -> attempt_match_and_create_game_async ~client_id ~maybe_waiter)
+      ()
+  ;;
+end
+
 let dice_face value =
   match value with
   | 1 -> "⚀"
@@ -20,7 +358,6 @@ let dice_face value =
   | _ -> "?"
 ;;
 
-(* Render a single die *)
 let render_die ?(hidden = false) value =
   if hidden
   then Node.div ~attrs:[ Attr.class_ "die hidden" ] [ Node.text "?" ]
@@ -30,7 +367,6 @@ let render_die ?(hidden = false) value =
       [ Node.span ~attrs:[ Attr.class_ "face" ] [ Node.text (dice_face value) ] ]
 ;;
 
-(* --- Model and helpers --- *)
 type game_mode =
   | TitleScreen
   | AIMode
@@ -41,10 +377,15 @@ type model =
   { game : Game.t
   ; round_message : string option
   ; selected_move_index : int
-  ; ai_thinking : bool (* Track if AI is about to move *)
-  ; round_end_ticks : int (* Count ticks since round ended (0 = not ended) *)
+  ; ai_thinking : bool
+  ; round_end_ticks : int
   ; game_mode : game_mode
-  ; title_screen_ticks : int (* Count ticks for title screen animations *)
+  ; title_screen_ticks : int
+  ; client_id : string
+  ; waiting_in_queue : bool
+  ; current_game_id : string option
+  ; starter : int option
+  ; last_error : string option
   }
 [@@deriving sexp]
 
@@ -56,6 +397,11 @@ let model_init () : model =
   ; round_end_ticks = 0
   ; game_mode = TitleScreen
   ; title_screen_ticks = 0
+  ; client_id = Multiplayer.generate_client_id ()
+  ; waiting_in_queue = false
+  ; current_game_id = None
+  ; starter = None
+  ; last_error = None
   }
 ;;
 
@@ -69,18 +415,16 @@ let move_to_string = function
   | `CallLiar -> "Call Liar"
 ;;
 
-(* Check if it's AI's turn *)
-let is_ai_turn (m : model) : bool =
+let is_local_player_turn (m : model) : bool =
   match Game.get_winner m.game, Game.current_round m.game with
   | Some _, _ -> false
   | _, None -> false
   | None, Some round ->
     (match Round.get_current_player round with
-     | Player.Player1 -> false
-     | Player.Player2 -> true)
+     | Player.Player1 -> true
+     | Player.Player2 -> false)
 ;;
 
-(* Execute a single AI move *)
 let execute_ai_move (m : model) : model =
   match Game.current_round m.game with
   | None -> m
@@ -89,9 +433,11 @@ let execute_ai_move (m : model) : model =
      | `Bid b ->
        (match Round.make_bid round b with
         | Ok new_round ->
-          { m with game = { m.game with current_round = Some new_round }; ai_thinking = false }
+          { m with
+            game = { m.game with current_round = Some new_round }
+          ; ai_thinking = false
+          }
         | Error _ ->
-          (* If AI produced invalid bid (shouldn't happen), call liar *)
           (match Round.call_liar round with
            | Ok (winner, _) ->
              let game' = Game.apply_round_result m.game winner in
@@ -123,7 +469,10 @@ let execute_ai_move (m : model) : model =
         | Error _ -> { m with ai_thinking = false }))
 ;;
 
-(* Render title screen *)
+let maybe_rotate_game_for_starter (game : Game.t) (_starter_opt : int option) : Game.t =
+  game
+;;
+
 let render_title_screen model set_model =
   let round = Game.current_round model.game in
   let top_dice =
@@ -136,15 +485,13 @@ let render_title_screen model set_model =
     ~attrs:[ Attr.class_ "title-screen" ]
     [ Node.div
         ~attrs:[ Attr.class_ "game-container" ]
-        [ (* Top dice set *)
-          Node.div
+        [ Node.div
             ~attrs:[ Attr.class_ "hand" ]
             [ Node.div
                 ~attrs:[ Attr.class_ "dice-container" ]
                 (List.map top_dice ~f:render_die)
             ]
-        ; (* Title and buttons in center *)
-          Node.div
+        ; Node.div
             ~attrs:[ Attr.class_ "game-info title-info" ]
             [ Node.h1 [ Node.text "Liar's Dice" ]
             ; Node.div
@@ -153,19 +500,31 @@ let render_title_screen model set_model =
                     ~attrs:
                       [ Attr.class_ "btn btn-mode"
                       ; Attr.on_click (fun _ev ->
-                          set_model { model with game_mode = AIMode; game = Game.init ~dice_per_player:5 })
+                          set_model
+                            { model with
+                              game_mode = AIMode
+                            ; game = Game.init ~dice_per_player:5
+                            })
                       ]
                     [ Node.text "AI" ]
                 ; Node.button
                     ~attrs:
-                      [ Attr.class_ "btn btn-mode btn-disabled"
-                      ; Attr.bool_property "disabled" true
+                      [ Attr.class_ "btn btn-mode"
+                      ; Attr.on_click (fun _ev ->
+                          let new_model =
+                            { model with game_mode = OnlineMode; waiting_in_queue = true }
+                          in
+                          set_model
+                            { new_model with
+                              current_game_id = None
+                            ; starter = None
+                            ; last_error = None
+                            })
                       ]
                     [ Node.text "Online" ]
                 ]
             ]
-        ; (* Bottom dice set *)
-          Node.div
+        ; Node.div
             ~attrs:[ Attr.class_ "hand" ]
             [ Node.div
                 ~attrs:[ Attr.class_ "dice-container" ]
@@ -175,9 +534,7 @@ let render_title_screen model set_model =
     ]
 ;;
 
-(* Create the main UI component *)
 let component =
-  (* State: model with custom equality via sexp *)
   let%sub model, set_model =
     let module M = struct
       type t = model [@@deriving sexp]
@@ -187,41 +544,121 @@ let component =
     in
     Bonsai.state (module M) ~default_model:(model_init ())
   in
-  (* Set up a clock to check for AI moves and auto-progression *)
   let%sub () =
     let callback =
       let%map model = model
       and set_model = set_model in
-      (* Handle title screen animations *)
+      if (not model.waiting_in_queue) || not (equal_game_mode model.game_mode OnlineMode)
+      then Effect.Ignore
+      else
+        let open Vdom.Effect.Let_syntax in
+        let%bind queue_res = Multiplayer.fetch_queue_effect () in
+        match queue_res with
+        | Error msg ->
+          set_model { model with last_error = Some ("Matchmaking fetch failed: " ^ msg) }
+        | Ok None ->
+          let%bind set_res =
+            Multiplayer.set_queue_waiter_effect ~client_id:model.client_id
+          in
+          (match set_res with
+           | Ok () -> Vdom.Effect.Ignore
+           | Error msg ->
+             set_model { model with last_error = Some ("Failed to join queue: " ^ msg) })
+        | Ok (Some waiter) ->
+          if String.equal waiter.client_id model.client_id
+          then Vdom.Effect.Ignore
+          else (
+            let%bind match_res =
+              Multiplayer.attempt_match_and_create_game_effect
+                ~client_id:model.client_id
+                ~maybe_waiter:(Some waiter)
+            in
+            match match_res with
+            | Error msg ->
+              set_model { model with last_error = Some ("Match create failed: " ^ msg) }
+            | Ok None -> Vdom.Effect.Ignore
+            | Ok (Some created_game_id) ->
+              let%bind _ = Multiplayer.clear_queue_effect () in
+              let%bind fetch_res =
+                Multiplayer.fetch_document_effect ~game_id:created_game_id
+              in
+              (match fetch_res with
+               | Error msg ->
+                 set_model
+                   { model with last_error = Some ("Fetch created game failed: " ^ msg) }
+               | Ok None ->
+                 set_model { model with last_error = Some "Created game not found" }
+               | Ok (Some (maybe_state, starter)) ->
+                 let game_state = Option.value_exn maybe_state in
+                 let rotated = maybe_rotate_game_for_starter game_state starter in
+                 set_model
+                   { model with
+                     game = rotated
+                   ; waiting_in_queue = false
+                   ; current_game_id = Some created_game_id
+                   ; starter
+                   ; last_error = None
+                   }))
+    in
+    Bonsai.Clock.every
+      ~when_to_start_next_effect:`Every_multiple_of_period_blocking
+      (Time_ns.Span.of_sec 1.0)
+      callback
+  in
+  let%sub () =
+    let callback =
+      let%map model = model
+      and set_model = set_model in
+      match model.current_game_id with
+      | None -> Effect.Ignore
+      | Some gid ->
+        let open Vdom.Effect.Let_syntax in
+        let%bind fetch_res = Multiplayer.fetch_document_effect ~game_id:gid in
+        (match fetch_res with
+         | Error msg -> set_model { model with last_error = Some ("Sync failed: " ^ msg) }
+         | Ok None -> set_model { model with last_error = Some "Game not found" }
+         | Ok (Some (maybe_state, starter)) ->
+           let game_state = Option.value_exn maybe_state in
+           let rotated = maybe_rotate_game_for_starter game_state starter in
+           set_model { model with game = rotated; starter; last_error = None })
+    in
+    Bonsai.Clock.every
+      ~when_to_start_next_effect:`Every_multiple_of_period_blocking
+      (Time_ns.Span.of_sec 1.5)
+      callback
+  in
+  let%sub () =
+    let callback =
+      let%map model = model
+      and set_model = set_model in
       if equal_game_mode model.game_mode TitleScreen
-      then
+      then (
         let new_ticks = model.title_screen_ticks + 1 in
         if new_ticks mod 2 = 0
         then
-          (* Update dice every 2 ticks *)
-          set_model { model with title_screen_ticks = new_ticks; game = Game.init ~dice_per_player:5 }
-        else
-          set_model { model with title_screen_ticks = new_ticks }
-      (* Check for automatic round progression *)
+          set_model
+            { model with
+              title_screen_ticks = new_ticks
+            ; game = Game.init ~dice_per_player:5
+            }
+        else set_model { model with title_screen_ticks = new_ticks })
       else if model.round_end_ticks > 0 && Option.is_none (Game.get_winner model.game)
       then
-        if model.round_end_ticks >= 8 (* 8 ticks * 0.5s = 4 seconds *)
-        then
-          (* Auto-progress to next round *)
+        if model.round_end_ticks >= 8
+        then (
           let game' = Game.next_round_if_possible model.game in
-          set_model { model with game = game'; round_message = None; round_end_ticks = 0 }
-        else
-          (* Increment tick counter *)
-          set_model { model with round_end_ticks = model.round_end_ticks + 1 }
-      else if is_ai_turn model && not model.ai_thinking
-      then
-        (* Mark AI as thinking and schedule the move *)
-        set_model { model with ai_thinking = true }
-      else if model.ai_thinking
-      then
-        (* Execute the AI move after delay *)
+          set_model { model with game = game'; round_message = None; round_end_ticks = 0 })
+        else set_model { model with round_end_ticks = model.round_end_ticks + 1 }
+      else if
+        equal_game_mode model.game_mode AIMode
+        && (not (is_local_player_turn model))
+        && Option.is_some (Game.current_round model.game)
+        && not model.ai_thinking
+      then set_model { model with ai_thinking = true }
+      else if equal_game_mode model.game_mode AIMode && model.ai_thinking
+      then (
         let new_model = execute_ai_move model in
-        set_model new_model
+        set_model new_model)
       else Effect.Ignore
     in
     Bonsai.Clock.every
@@ -231,17 +668,252 @@ let component =
   in
   let%arr model = model
   and set_model = set_model in
-  (* Show title screen if in TitleScreen mode *)
+  let game = model.game in
   match model.game_mode with
   | TitleScreen -> render_title_screen model set_model
-  | OnlineMode -> Node.div [ Node.text "Online mode coming soon!" ]
+  | OnlineMode ->
+    if model.waiting_in_queue
+    then
+      Node.div
+        ~attrs:[ Attr.class_ "setup-screen" ]
+        [ Node.h2 [ Node.text "Searching for opponent..." ]
+        ; Node.p [ Node.text (Printf.sprintf "Client id: %s" model.client_id) ]
+        ; Node.div
+            [ Node.button
+                ~attrs:
+                  [ Attr.class_ "btn"
+                  ; Attr.on_click (fun _ ->
+                      let _ = Multiplayer.clear_queue_effect () in
+                      set_model { model with waiting_in_queue = false; last_error = None })
+                  ]
+                [ Node.text "Cancel Matchmaking" ]
+            ]
+        ; (match model.last_error with
+           | None -> Node.none
+           | Some e -> Node.div ~attrs:[ Attr.class_ "move-error-banner" ] [ Node.text e ])
+        ]
+    else (
+      let round = Game.current_round game in
+      let current_bid = Option.bind round ~f:Round.get_current_bid in
+      let current_player = Option.map round ~f:Round.get_current_player in
+      let p1_score = Game.rounds_won_by game Player.Player1 in
+      let p2_score = Game.rounds_won_by game Player.Player2 in
+      let p1_hand =
+        Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player1)
+      in
+      let p2_hand =
+        Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player2)
+      in
+      let turn_text =
+        match current_player with
+        | None -> "Game over"
+        | Some Player.Player1 -> "Player 1's Turn"
+        | Some Player.Player2 -> "Player 2's Turn"
+      in
+      let is_player_turn =
+        Option.value_map current_player ~default:false ~f:(Player.equal Player.Player1)
+      in
+      let game_in_progress =
+        Option.is_none (Game.get_winner game) && Option.is_some round
+      in
+      let buttons_enabled = game_in_progress && is_player_turn in
+      let valid_moves =
+        Option.value_map round ~default:[] ~f:(fun r -> Round.get_all_moves r)
+      in
+      let selected_move_index =
+        if List.length valid_moves = 0
+        then 0
+        else Int.min model.selected_move_index (List.length valid_moves - 1)
+      in
+      let on_move_select =
+        Attr.on_input (fun _ev str ->
+          let new_index = Option.value (Int.of_string_opt str) ~default:0 in
+          set_model { model with selected_move_index = new_index })
+      in
+      let make_move_handler =
+        Attr.on_click (fun _ev ->
+          match Game.current_round game with
+          | None -> Effect.Ignore
+          | Some round ->
+            if not is_player_turn
+            then Effect.Ignore
+            else (
+              let selected_move = List.nth valid_moves selected_move_index in
+              match selected_move with
+              | None -> Effect.Ignore
+              | Some (`Bid bid) ->
+                (match Round.make_bid round bid with
+                 | Error _ -> Effect.Ignore
+                 | Ok new_round ->
+                   let new_game = { game with current_round = Some new_round } in
+                   (match model.current_game_id with
+                    | Some gid ->
+                      let open Vdom.Effect.Let_syntax in
+                      let%bind res =
+                        Multiplayer.save_game_state_effect
+                          ~game_id:gid
+                          ~game_state:new_game
+                      in
+                      (match res with
+                       | Ok () -> set_model { model with game = new_game }
+                       | Error err ->
+                         set_model
+                           { model with last_error = Some ("Sync failed: " ^ err) })
+                    | None -> set_model { model with game = new_game }))
+              | Some `CallLiar ->
+                (match Round.call_liar round with
+                 | Error _ -> Effect.Ignore
+                 | Ok (winner, _msg) ->
+                   let game' = Game.apply_round_result game winner in
+                   let round_message =
+                     if Player.equal winner Player.Player1
+                     then "You won the round!"
+                     else "You lost the round!"
+                   in
+                   (match model.current_game_id with
+                    | Some gid ->
+                      let open Vdom.Effect.Let_syntax in
+                      let%bind res =
+                        Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+                      in
+                      (match res with
+                       | Ok () ->
+                         set_model
+                           { model with
+                             game = game'
+                           ; round_message = Some round_message
+                           ; round_end_ticks = 1
+                           }
+                       | Error err ->
+                         set_model
+                           { model with last_error = Some ("Sync failed: " ^ err) })
+                    | None ->
+                      set_model
+                        { model with
+                          game = game'
+                        ; round_message = Some round_message
+                        ; round_end_ticks = 1
+                        }))))
+      in
+      let move_controls =
+        Node.div
+          ~attrs:[ Attr.class_ "action-bar" ]
+          [ Node.select
+              ~attrs:
+                [ (if buttons_enabled
+                   then Attr.empty
+                   else Attr.bool_property "disabled" true)
+                ; on_move_select
+                ]
+              (List.mapi valid_moves ~f:(fun i move ->
+                 Node.option
+                   ~attrs:
+                     [ Attr.value (Int.to_string i)
+                     ; (if i = selected_move_index then Attr.selected else Attr.empty)
+                     ]
+                   [ Node.text (move_to_string move) ]))
+          ; Node.button
+              ~attrs:
+                [ Attr.class_ "btn make-move"
+                ; (if buttons_enabled
+                   then Attr.empty
+                   else Attr.bool_property "disabled" true)
+                ; make_move_handler
+                ]
+              [ Node.text "Make Move" ]
+          ]
+      in
+      let show_opponent_dice = Option.is_some model.round_message in
+      Node.div
+        [ Node.div
+            ~attrs:[ Attr.class_ "game-container" ]
+            [ Node.div
+                ~attrs:[ Attr.class_ "hand" ]
+                [ Node.div
+                    ~attrs:[ Attr.class_ "player-label" ]
+                    [ Node.text "Opponent (Player 2)" ]
+                ; Node.div
+                    ~attrs:[ Attr.class_ "dice-container" ]
+                    (List.map p2_hand ~f:(fun v ->
+                       render_die ~hidden:(not show_opponent_dice) v))
+                ]
+            ; Node.div
+                ~attrs:[ Attr.class_ "game-info" ]
+                [ Node.h1 [ Node.text "Liar's Dice" ]
+                ; Node.div
+                    ~attrs:[ Attr.class_ "scoreboard" ]
+                    [ Node.span
+                        ~attrs:[ Attr.class_ "score player1-score" ]
+                        [ Node.text (sprintf "Player 1: %d" p1_score) ]
+                    ; Node.span
+                        ~attrs:[ Attr.class_ "score player2-score" ]
+                        [ Node.text (sprintf "Player 2: %d" p2_score) ]
+                    ]
+                ; Node.p ~attrs:[ Attr.id "turn-info" ] [ Node.text turn_text ]
+                ; Node.p
+                    ~attrs:[ Attr.id "bid-info" ]
+                    [ Node.text (bid_to_string current_bid) ]
+                ]
+            ; Node.div
+                ~attrs:[ Attr.class_ "hand player-hand" ]
+                [ Node.div
+                    ~attrs:[ Attr.class_ "dice-container" ]
+                    (List.map p1_hand ~f:(render_die ~hidden:false))
+                ; Node.div
+                    ~attrs:[ Attr.class_ "player-label" ]
+                    [ Node.text "You (Player 1)" ]
+                ; move_controls
+                ]
+            ]
+        ; (match model.round_message, Game.get_winner game with
+           | None, None -> Node.none
+           | Some msg, None ->
+             Node.div
+               ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
+               [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
+           | _, Some winner ->
+             let msg =
+               if Player.equal winner Player.Player1
+               then "You won the game!"
+               else "You lost the game!"
+             in
+             Node.div
+               ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
+               [ Node.div
+                   ~attrs:[ Attr.class_ "message-content" ]
+                   [ Node.text msg
+                   ; Node.p
+                       ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ]
+                       [ Node.text "Play another?" ]
+                   ; Node.div
+                       ~attrs:[ Attr.class_ "mode-buttons" ]
+                       [ Node.button
+                           ~attrs:
+                             [ Attr.class_ "btn btn-mode"
+                             ; Attr.on_click (fun _ev ->
+                                 set_model
+                                   { (model_init ()) with
+                                     game_mode = AIMode
+                                   ; game = Game.init ~dice_per_player:5
+                                   })
+                             ]
+                           [ Node.text "AI" ]
+                       ; Node.button
+                           ~attrs:
+                             [ Attr.class_ "btn btn-mode btn-disabled"
+                             ; Attr.bool_property "disabled" true
+                             ]
+                           [ Node.text "Online" ]
+                       ]
+                   ]
+               ])
+        ])
   | AIMode ->
-    let game = model.game in
-    let round = Game.current_round game in
+    let round = Game.current_round model.game in
     let current_bid = Option.bind round ~f:Round.get_current_bid in
     let current_player = Option.map round ~f:Round.get_current_player in
-    let p1_score = Game.rounds_won_by game Player.Player1 in
-    let p2_score = Game.rounds_won_by game Player.Player2 in
+    let p1_score = Game.rounds_won_by model.game Player.Player1 in
+    let p2_score = Game.rounds_won_by model.game Player.Player2 in
     let p1_hand =
       Option.value_map round ~default:[] ~f:(fun r -> Round.hand_of r Player.Player1)
     in
@@ -257,19 +929,18 @@ let component =
     let is_player_turn =
       Option.value_map current_player ~default:false ~f:(Player.equal Player.Player1)
     in
-    let game_in_progress = Option.is_none (Game.get_winner game) && Option.is_some round in
+    let game_in_progress =
+      Option.is_none (Game.get_winner model.game) && Option.is_some round
+    in
     let buttons_enabled = game_in_progress && is_player_turn in
-    (* Get valid moves for current state *)
     let valid_moves =
       Option.value_map round ~default:[] ~f:(fun r -> Round.get_all_moves r)
     in
-    (* Ensure selected index is in bounds *)
     let selected_move_index =
       if List.length valid_moves = 0
       then 0
       else Int.min model.selected_move_index (List.length valid_moves - 1)
     in
-    (* Handlers *)
     let on_move_select =
       Attr.on_input (fun _ev str ->
         let new_index = Option.value (Int.of_string_opt str) ~default:0 in
@@ -277,7 +948,7 @@ let component =
     in
     let make_move_handler =
       Attr.on_click (fun _ev ->
-        match Game.current_round game with
+        match Game.current_round model.game with
         | None -> Effect.Ignore
         | Some round ->
           if not is_player_turn
@@ -290,28 +961,35 @@ let component =
               (match Round.make_bid round bid with
                | Error _ -> Effect.Ignore
                | Ok new_round ->
-                 (* Update game state, AI will move on next clock tick *)
                  set_model
-                   { model with game = { game with current_round = Some new_round } })
-             | Some `CallLiar ->
-               (match Round.call_liar round with
-                | Error _ -> Effect.Ignore
-                | Ok (winner, _msg) ->
-                  let game' = Game.apply_round_result game winner in
-                  let round_message =
-                    if Player.equal winner Player.Player1
-                    then "You won the round!"
-                    else "You lost the round!"
-                  in
-                  set_model { model with game = game'; round_message = Some round_message; round_end_ticks = 1 })))
+                   { model with
+                     game = { model.game with current_round = Some new_round }
+                   })
+            | Some `CallLiar ->
+              (match Round.call_liar round with
+               | Error _ -> Effect.Ignore
+               | Ok (winner, _msg) ->
+                 let game' = Game.apply_round_result model.game winner in
+                 let round_message =
+                   if Player.equal winner Player.Player1
+                   then "You won the round!"
+                   else "You lost the round!"
+                 in
+                 set_model
+                   { model with
+                     game = game'
+                   ; round_message = Some round_message
+                   ; round_end_ticks = 1
+                   })))
     in
-    (* Dropdown for valid moves *)
     let move_controls =
       Node.div
         ~attrs:[ Attr.class_ "action-bar" ]
         [ Node.select
             ~attrs:
-              [ (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
+              [ (if buttons_enabled
+                 then Attr.empty
+                 else Attr.bool_property "disabled" true)
               ; on_move_select
               ]
             (List.mapi valid_moves ~f:(fun i move ->
@@ -324,30 +1002,29 @@ let component =
         ; Node.button
             ~attrs:
               [ Attr.class_ "btn make-move"
-              ; (if buttons_enabled then Attr.empty else Attr.bool_property "disabled" true)
+              ; (if buttons_enabled
+                 then Attr.empty
+                 else Attr.bool_property "disabled" true)
               ; make_move_handler
               ]
             [ Node.text "Make Move" ]
         ]
     in
-    (* The view *)
-    (* Show opponent's dice when round has ended *)
     let show_opponent_dice = Option.is_some model.round_message in
     Node.div
       [ Node.div
           ~attrs:[ Attr.class_ "game-container" ]
-          [ (* Opponent's hand (hidden during play, visible after round ends) *)
-            Node.div
+          [ Node.div
               ~attrs:[ Attr.class_ "hand" ]
               [ Node.div
                   ~attrs:[ Attr.class_ "player-label" ]
                   [ Node.text "Opponent (Player 2)" ]
               ; Node.div
                   ~attrs:[ Attr.class_ "dice-container" ]
-                  (List.map p2_hand ~f:(render_die ~hidden:(not show_opponent_dice)))
+                  (List.map p2_hand ~f:(fun v ->
+                     render_die ~hidden:(not show_opponent_dice) v))
               ]
-          ; (* Game info section *)
-            Node.div
+          ; Node.div
               ~attrs:[ Attr.class_ "game-info" ]
               [ Node.h1 [ Node.text "Liar's Dice" ]
               ; Node.div
@@ -364,8 +1041,7 @@ let component =
                   ~attrs:[ Attr.id "bid-info" ]
                   [ Node.text (bid_to_string current_bid) ]
               ]
-          ; (* Player's hand and actions *)
-            Node.div
+          ; Node.div
               ~attrs:[ Attr.class_ "hand player-hand" ]
               [ Node.div
                   ~attrs:[ Attr.class_ "dice-container" ]
@@ -376,8 +1052,7 @@ let component =
               ; move_controls
               ]
           ]
-      ; (* Popup overlay for round/game message *)
-        (match model.round_message, Game.get_winner game with
+      ; (match model.round_message, Game.get_winner model.game with
          | None, None -> Node.none
          | Some msg, None ->
            Node.div
@@ -394,14 +1069,20 @@ let component =
              [ Node.div
                  ~attrs:[ Attr.class_ "message-content" ]
                  [ Node.text msg
-                 ; Node.p ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ] [ Node.text "Play another?" ]
+                 ; Node.p
+                     ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ]
+                     [ Node.text "Play another?" ]
                  ; Node.div
                      ~attrs:[ Attr.class_ "mode-buttons" ]
                      [ Node.button
                          ~attrs:
                            [ Attr.class_ "btn btn-mode"
                            ; Attr.on_click (fun _ev ->
-                               set_model { (model_init ()) with game_mode = AIMode; game = Game.init ~dice_per_player:5 })
+                               set_model
+                                 { (model_init ()) with
+                                   game_mode = AIMode
+                                 ; game = Game.init ~dice_per_player:5
+                                 })
                            ]
                          [ Node.text "AI" ]
                      ; Node.button
@@ -416,7 +1097,6 @@ let component =
       ]
 ;;
 
-(* Start the app *)
 let () =
   Random.self_init ();
   Bonsai_web.Start.start ~bind_to_element_with_id:"app" component
