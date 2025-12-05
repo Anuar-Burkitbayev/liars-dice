@@ -94,12 +94,12 @@ module Multiplayer = struct
             with
             | _ -> None
           in
-          let waiter_client_id =
+          let player1 =
             try
-              let waiter_field = Js.Unsafe.get fields "waiter_client_id" in
-              if Js.Optdef.test (Js.Optdef.return waiter_field)
+              let p1_field = Js.Unsafe.get fields "player1" in
+              if Js.Optdef.test (Js.Optdef.return p1_field)
               then (
-                let sv = Js.Unsafe.get waiter_field "stringValue" in
+                let sv = Js.Unsafe.get p1_field "stringValue" in
                 if Js.Optdef.test (Js.Optdef.return sv)
                 then Some (Js.to_string sv)
                 else None)
@@ -107,13 +107,29 @@ module Multiplayer = struct
             with
             | _ -> None
           in
-          Ok (Some (maybe_state, starter, waiter_client_id)))
+          let player2 =
+            try
+              let p2_field = Js.Unsafe.get fields "player2" in
+              if Js.Optdef.test (Js.Optdef.return p2_field)
+              then (
+                let sv = Js.Unsafe.get p2_field "stringValue" in
+                if Js.Optdef.test (Js.Optdef.return sv)
+                then Some (Js.to_string sv)
+                else None)
+              else None
+            with
+            | _ -> None
+          in
+          Ok (Some (maybe_state, starter, player1, player2)))
     with
     | exn -> Error (Printf.sprintf "Parse error: %s" (Exn.to_string exn))
   ;;
 
   let fetch_document_async ~game_id
-    : ((Game.t option * int option * string option) option, string) Result.t Deferred.t
+    : ( (Game.t option * int option * string option * string option) option
+        , string )
+        Result.t
+        Deferred.t
     =
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
@@ -169,7 +185,7 @@ module Multiplayer = struct
       ()
   ;;
 
-  let create_game_async ~game_id ~game_state ~starter ~waiter_client_id
+  let create_game_async ~game_id ~game_state ~starter ~player1_id ~player2_id
     : (unit, string) Result.t Deferred.t
     =
     let ivar = Ivar.create () in
@@ -182,10 +198,11 @@ module Multiplayer = struct
     let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
     let body =
       Printf.sprintf
-        "{\"fields\":{\"state\":{\"stringValue\":\"%s\"},\"starter\":{\"integerValue\":\"%d\"},\"waiter_client_id\":{\"stringValue\":\"%s\"}}}"
+        "{\"fields\":{\"state\":{\"stringValue\":\"%s\"},\"starter\":{\"integerValue\":\"%d\"},\"player1\":{\"stringValue\":\"%s\"},\"player2\":{\"stringValue\":\"%s\"}}}"
         game_state_sexp
         starter
-        (String.escaped waiter_client_id)
+        (String.escaped player1_id)
+        (String.escaped player2_id)
     in
     xhr##.onreadystatechange
     := Js.wrap_callback (fun _ ->
@@ -326,6 +343,76 @@ module Multiplayer = struct
     Bonsai_web.Effect.of_deferred_fun (fun () -> clear_queue_async ()) ()
   ;;
 
+  let find_game_for_client_async ~client_id : (string option, string) Result.t Deferred.t =
+    let ivar = Ivar.create () in
+    let xhr = XmlHttpRequest.create () in
+    let list_url =
+      Printf.sprintf "%s/games?key=%s&pageSize=50" base_url firebase_api_key
+    in
+    xhr##_open (Js.string "GET") (Js.string list_url) Js._true;
+    xhr##.onreadystatechange
+    := Js.wrap_callback (fun _ ->
+         match xhr##.readyState with
+         | XmlHttpRequest.DONE ->
+           let status = xhr##.status in
+           if status >= 200 && status < 300
+           then (
+             try
+               let resp = Js.Opt.case xhr##.responseText (fun () -> "{}") Js.to_string in
+               let json = Js.Unsafe.global##._JSON##parse (Js.string resp) in
+               let documents = Js.Unsafe.get json "documents" in
+               if Js.Optdef.test (Js.Optdef.return documents)
+               then (
+                 let docs_array = Js.to_array documents in
+                 let found_game = ref None in
+                 Array.iter docs_array ~f:(fun doc ->
+                   try
+                     let fields = Js.Unsafe.get doc "fields" in
+                     let p1_field = Js.Unsafe.get fields "player1" in
+                     let p2_field = Js.Unsafe.get fields "player2" in
+                     let p1_match =
+                       if Js.Optdef.test (Js.Optdef.return p1_field)
+                       then (
+                         let sv = Js.Unsafe.get p1_field "stringValue" in
+                         String.equal (Js.to_string sv) client_id)
+                       else false
+                     in
+                     let p2_match =
+                       if Js.Optdef.test (Js.Optdef.return p2_field)
+                       then (
+                         let sv = Js.Unsafe.get p2_field "stringValue" in
+                         String.equal (Js.to_string sv) client_id)
+                       else false
+                     in
+                     if p1_match || p2_match
+                     then (
+                       let name = Js.Unsafe.get doc "name" in
+                       let name_str = Js.to_string name in
+                       let game_id =
+                         match String.rsplit2 name_str ~on:'/' with
+                         | Some (_, id) -> id
+                         | None -> ""
+                       in
+                       if String.length game_id > 0 then found_game := Some game_id)
+                   with
+                   | _ -> ());
+                 Ivar.fill ivar (Ok !found_game))
+               else Ivar.fill ivar (Ok None)
+             with
+             | exn ->
+               Ivar.fill
+                 ivar
+                 (Error (Printf.sprintf "Parse error: %s" (Exn.to_string exn))))
+           else Ivar.fill ivar (Error (Printf.sprintf "Failed to list games: %d" status))
+         | _ -> ());
+    ignore (xhr##send Js.null);
+    Ivar.read ivar
+  ;;
+
+  let find_game_for_client_effect ~client_id =
+    Bonsai_web.Effect.of_deferred_fun (fun () -> find_game_for_client_async ~client_id) ()
+  ;;
+
   let attempt_match_and_create_game_async ~client_id ~(maybe_waiter : queue_entry option)
     : (string option, string) Result.t Deferred.t
     =
@@ -350,7 +437,8 @@ module Multiplayer = struct
             ~game_id:created_game_id
             ~game_state:initial_game
             ~starter
-            ~waiter_client_id:waiter_id
+            ~player1_id:waiter_id
+            ~player2_id:client_id
         in
         Ivar.fill
           ivar
@@ -615,7 +703,42 @@ let component =
              set_model { model with last_error = Some ("Failed to join queue: " ^ msg) })
         | Ok (Some waiter) ->
           if String.equal waiter.client_id model.client_id
-          then Vdom.Effect.Ignore
+          then (
+            (* We are the waiter - check if a game was created for us *)
+            let%bind game_search_res =
+              Multiplayer.find_game_for_client_effect ~client_id:model.client_id
+            in
+            match game_search_res with
+            | Error _ -> Vdom.Effect.Ignore
+            | Ok None -> Vdom.Effect.Ignore
+            | Ok (Some found_game_id) ->
+              (* Found a game! Fetch it and start playing *)
+              let%bind fetch_res =
+                Multiplayer.fetch_document_effect ~game_id:found_game_id
+              in
+              (match fetch_res with
+               | Error _ -> Vdom.Effect.Ignore
+               | Ok None -> Vdom.Effect.Ignore
+               | Ok (Some (maybe_state, starter, player1, player2)) ->
+                 let game_state = Option.value_exn maybe_state in
+                 let my_player_number =
+                   match player1, player2 with
+                   | Some p1, _ when String.equal p1 model.client_id -> Some 1
+                   | _, Some p2 when String.equal p2 model.client_id -> Some 2
+                   | _ -> None
+                 in
+                 let rotated =
+                   maybe_rotate_game_for_starter game_state my_player_number
+                 in
+                 set_model
+                   { model with
+                     game = rotated
+                   ; waiting_in_queue = false
+                   ; current_game_id = Some found_game_id
+                   ; starter
+                   ; my_player_number
+                   ; last_error = None
+                   }))
           else (
             let%bind match_res =
               Multiplayer.attempt_match_and_create_game_effect
@@ -637,14 +760,14 @@ let component =
                    { model with last_error = Some ("Fetch created game failed: " ^ msg) }
                | Ok None ->
                  set_model { model with last_error = Some "Created game not found" }
-               | Ok (Some (maybe_state, starter, waiter_client_id)) ->
+               | Ok (Some (maybe_state, starter, player1, player2)) ->
                  let game_state = Option.value_exn maybe_state in
-                 (* Determine which player we are based on waiter_client_id *)
+                 (* Determine which player we are based on player1/player2 *)
                  let my_player_number =
-                   match waiter_client_id with
-                   | Some wid ->
-                     if String.equal wid model.client_id then Some 1 else Some 2
-                   | None -> None
+                   match player1, player2 with
+                   | Some p1, _ when String.equal p1 model.client_id -> Some 1
+                   | _, Some p2 when String.equal p2 model.client_id -> Some 2
+                   | _ -> None
                  in
                  let rotated =
                    maybe_rotate_game_for_starter game_state my_player_number
@@ -676,13 +799,14 @@ let component =
         (match fetch_res with
          | Error msg -> set_model { model with last_error = Some ("Sync failed: " ^ msg) }
          | Ok None -> set_model { model with last_error = Some "Game not found" }
-         | Ok (Some (maybe_state, starter, waiter_client_id)) ->
+         | Ok (Some (maybe_state, starter, player1, player2)) ->
            let game_state = Option.value_exn maybe_state in
-           (* Determine which player we are based on waiter_client_id *)
+           (* Determine which player we are based on player1/player2 *)
            let my_player_number =
-             match waiter_client_id with
-             | Some wid -> if String.equal wid model.client_id then Some 1 else Some 2
-             | None -> model.my_player_number
+             match player1, player2 with
+             | Some p1, _ when String.equal p1 model.client_id -> Some 1
+             | _, Some p2 when String.equal p2 model.client_id -> Some 2
+             | _ -> model.my_player_number
            in
            let rotated = maybe_rotate_game_for_starter game_state my_player_number in
            set_model
