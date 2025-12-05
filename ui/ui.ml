@@ -29,7 +29,8 @@ module Multiplayer = struct
   let state_update_url game_id ~with_hands =
     let mask_params =
       if with_hands
-      then "&updateMask.fieldPaths=state&updateMask.fieldPaths=last_p1_hand&updateMask.fieldPaths=last_p2_hand"
+      then
+        "&updateMask.fieldPaths=state&updateMask.fieldPaths=last_p1_hand&updateMask.fieldPaths=last_p2_hand"
       else "&updateMask.fieldPaths=state"
     in
     Printf.sprintf
@@ -201,7 +202,10 @@ module Multiplayer = struct
     let ivar = Ivar.create () in
     let xhr = XmlHttpRequest.create () in
     let with_hands = Option.is_some last_round_hands in
-    xhr##_open (Js.string "PATCH") (Js.string (state_update_url game_id ~with_hands)) Js._true;
+    xhr##_open
+      (Js.string "PATCH")
+      (Js.string (state_update_url game_id ~with_hands))
+      Js._true;
     xhr##setRequestHeader (Js.string "Content-Type") (Js.string "application/json");
     let game_state_sexp = Game.sexp_of_t game_state |> Sexp.to_string |> String.escaped in
     let hands_fields =
@@ -913,12 +917,8 @@ let component =
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
            in
-           (* Use fetched hands if available, otherwise keep existing *)
-           let hands_to_use =
-             match fetched_hands with
-             | Some h -> Some h
-             | None -> model.last_round_hands
-           in
+           (* Use fetched hands - if None from server, that means hands were cleared *)
+           let hands_to_use = fetched_hands in
            (* Check if round just ended (round cleared but scores changed) *)
            let my_old_score = my_score model.game my_player_number in
            let my_new_score = my_score game_state my_player_number in
@@ -1265,7 +1265,8 @@ let component =
           ]
       in
       let show_opponent_dice =
-        Option.is_some model.round_message || Option.is_some model.last_round_hands
+        Option.is_some model.round_message
+        || (Option.is_some model.last_round_hands && Option.is_none round)
       in
       Node.div
         [ Node.div
@@ -1484,6 +1485,9 @@ let component =
               (match Round.call_liar round with
                | Error _ -> Effect.Ignore
                | Ok (winner, justification) ->
+                 let saved_hands =
+                   Round.hand_of round Player.Player1, Round.hand_of round Player.Player2
+                 in
                  let game' = Game.apply_round_result model.game winner in
                  let game_with_round_cleared = { game' with current_round = None } in
                  let round_message =
@@ -1496,6 +1500,7 @@ let component =
                      game = game_with_round_cleared
                    ; round_message = Some round_message
                    ; round_justification = Some justification
+                   ; last_round_hands = Some saved_hands
                    ; round_end_ticks = 1
                    })))
     in
@@ -1528,7 +1533,8 @@ let component =
         ]
     in
     let show_opponent_dice =
-      Option.is_some model.round_message || Option.is_some model.last_round_hands
+      Option.is_some model.round_message
+      || (Option.is_some model.last_round_hands && Option.is_none round)
     in
     Node.div
       [ Node.div
