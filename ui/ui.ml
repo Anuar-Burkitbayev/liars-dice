@@ -518,6 +518,7 @@ type model =
   ; processing_move : bool
   ; last_round_hands : (Hand.t * Hand.t) option
   ; last_error : string option
+  ; round_justification : string option
   }
 [@@deriving sexp]
 
@@ -537,6 +538,7 @@ let model_init () : model =
   ; processing_move = false
   ; last_round_hands = None
   ; last_error = None
+  ; round_justification = None
   }
 ;;
 
@@ -574,32 +576,32 @@ let execute_ai_move (m : model) : model =
           }
         | Error _ ->
           (match Round.call_liar round with
-           | Ok (winner, _) ->
+           | Ok (winner, justification) ->
              let game' = Game.apply_round_result m.game winner in
-             let game_with_round_cleared = { game' with current_round = None } in
              { m with
-               game = game_with_round_cleared
+               game = game'
              ; round_message =
                  Some
                    (if Player.equal winner Player.Player1
                     then "You won the round!"
                     else "You lost the round!")
+             ; round_justification = Some justification
              ; ai_thinking = false
              ; round_end_ticks = 1
              }
            | Error _ -> { m with ai_thinking = false }))
      | `CallLiar ->
        (match Round.call_liar round with
-        | Ok (winner, _) ->
+        | Ok (winner, justification) ->
           let game' = Game.apply_round_result m.game winner in
-          let game_with_round_cleared = { game' with current_round = None } in
           { m with
-            game = game_with_round_cleared
+            game = game'
           ; round_message =
               Some
                 (if Player.equal winner Player.Player1
                  then "You won the round!"
                  else "You lost the round!")
+          ; round_justification = Some justification
           ; ai_thinking = false
           ; round_end_ticks = 1
           }
@@ -844,22 +846,31 @@ let component =
              | _, Some p2 when String.equal p2 model.client_id -> Some 2
              | _ -> model.my_player_number
            in
-           (* Check if round just ended (game has no current_round but previous did) *)
+           (* Check if round just ended by comparing scores *)
+           let my_old_score = my_score model.game my_player_number in
+           let my_new_score = my_score game_state my_player_number in
            let should_show_round_end =
-             Option.is_none (Game.current_round game_state)
-             && Option.is_some (Game.current_round model.game)
-             && model.round_end_ticks = 0
+             my_new_score <> my_old_score && model.round_end_ticks = 0
            in
-           let round_message =
+           let round_message, round_justification =
              if should_show_round_end
              then (
-               (* Compare scores to determine round winner *)
-               let my_old_score = my_score model.game my_player_number in
-               let my_new_score = my_score game_state my_player_number in
-               if my_new_score > my_old_score
-               then Some "You won the round!"
-               else Some "You lost the round!")
-             else model.round_message
+               let msg =
+                 if my_new_score > my_old_score
+                 then Some "You won the round!"
+                 else Some "You lost the round!"
+               in
+               (* Calculate justification from the round *)
+               let justification =
+                 match Game.current_round game_state with
+                 | Some round ->
+                   (match Round.call_liar round with
+                    | Ok (_, just) -> Some just
+                    | Error _ -> None)
+                 | None -> None
+               in
+               msg, justification)
+             else model.round_message, model.round_justification
            in
            let round_end_ticks =
              if should_show_round_end then 1 else model.round_end_ticks
@@ -871,6 +882,7 @@ let component =
              ; starter
              ; my_player_number
              ; round_message
+             ; round_justification
              ; round_end_ticks
              ; processing_move = false
              ; last_error = None
@@ -917,6 +929,7 @@ let component =
                   { model with
                     game = game'
                   ; round_message = None
+                  ; round_justification = None
                   ; round_end_ticks = 0
                   ; last_round_hands = None
                   }
@@ -928,6 +941,7 @@ let component =
               set_model
                 { model with
                   round_message = None
+                ; round_justification = None
                 ; round_end_ticks = 0
                 ; last_round_hands = None
                 }
@@ -936,6 +950,7 @@ let component =
               { model with
                 game = game'
               ; round_message = None
+              ; round_justification = None
               ; round_end_ticks = 0
               ; last_round_hands = None
               })
@@ -1083,7 +1098,7 @@ let component =
                 else (
                   match Round.call_liar round with
                   | Error _ -> Effect.Ignore
-                  | Ok (winner, _msg) ->
+                  | Ok (winner, justification) ->
                     (* Save current hands before clearing round *)
                     let saved_hands =
                       Some
@@ -1091,8 +1106,8 @@ let component =
                         , Round.hand_of round Player.Player2 )
                     in
                     let game' = Game.apply_round_result game winner in
-                    (* Clear the current round so both players can detect round end *)
-                    let game_with_round_cleared = { game' with current_round = None } in
+                    (* Keep the round intact so both players can see the dice.
+                       It will be cleared when starting a new round. *)
                     (* Determine if I won based on the winner *)
                     let round_message =
                       if Player.equal winner (my_player model.my_player_number)
@@ -1105,16 +1120,15 @@ let component =
                        let%bind _ = set_model { model with processing_move = true } in
                        (* Game state is already canonical, save directly *)
                        let%bind res =
-                         Multiplayer.save_game_state_effect
-                           ~game_id:gid
-                           ~game_state:game_with_round_cleared
+                         Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
                        in
                        (match res with
                         | Ok () ->
                           set_model
                             { model with
-                              game = game_with_round_cleared
+                              game = game'
                             ; round_message = Some round_message
+                            ; round_justification = Some justification
                             ; round_end_ticks = 1
                             ; last_round_hands = saved_hands
                             ; processing_move = false
@@ -1128,8 +1142,9 @@ let component =
                      | None ->
                        set_model
                          { model with
-                           game = game_with_round_cleared
+                           game = game'
                          ; round_message = Some round_message
+                         ; round_justification = Some justification
                          ; round_end_ticks = 1
                          ; last_round_hands = saved_hands
                          }))))
@@ -1205,7 +1220,17 @@ let component =
            | Some msg, None ->
              Node.div
                ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
-               [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
+               [ Node.div
+                   ~attrs:[ Attr.class_ "message-content" ]
+                   [ Node.text msg
+                   ; (match model.round_justification with
+                      | None -> Node.none
+                      | Some just ->
+                        Node.p
+                          ~attrs:[ Attr.style (Css_gen.margin_top (`Rem 0.5)) ]
+                          [ Node.text just ])
+                   ]
+               ]
            | _, Some _ ->
              let msg =
                match did_i_win game model.my_player_number with
