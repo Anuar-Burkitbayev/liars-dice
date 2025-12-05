@@ -291,27 +291,6 @@ let component =
                     ~attrs:[ Attr.class_ "score player2-score" ]
                     [ Node.text (sprintf "Player 2: %d" p2_score) ]
                 ]
-            ; (* System message display *)
-              (match model.round_message, Game.get_winner game with
-               | None, None -> Node.none
-               | Some msg, None ->
-                 Node.div
-                   ~attrs:[ Attr.class_ "system-message-inline" ]
-                   [ Node.text msg ]
-               | _, Some winner ->
-                 let msg =
-                   if Player.equal winner Player.Player1
-                   then "You won the game!"
-                   else "You lost the game!"
-                 in
-                 Node.div
-                   ~attrs:[ Attr.class_ "system-message-inline game-over" ]
-                   [ Node.text msg
-                   ; Node.button
-                       ~attrs:
-                         [ Attr.class_ "btn btn-new-game"; new_round_handler ]
-                       [ Node.text "New Game" ]
-                   ])
             ; Node.p ~attrs:[ Attr.id "turn-info" ] [ Node.text turn_text ]
             ; Node.p
                 ~attrs:[ Attr.id "bid-info" ]
@@ -329,6 +308,29 @@ let component =
             ; move_controls
             ]
         ]
+    ; (* Popup overlay for round/game message *)
+      (match model.round_message, Game.get_winner game with
+       | None, None -> Node.none
+       | Some msg, None ->
+         Node.div
+           ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
+           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
+       | _, Some winner ->
+         let msg =
+           if Player.equal winner Player.Player1
+           then "You won the game!"
+           else "You lost the game!"
+         in
+         Node.div
+           ~attrs:[ Attr.id "round-message"; Attr.class_ "system-message" ]
+           [ Node.div
+               ~attrs:[ Attr.class_ "message-content" ]
+               [ Node.text msg
+               ; Node.button
+                   ~attrs:[ Attr.class_ "btn btn-new-game"; new_round_handler ]
+                   [ Node.text "New Game" ]
+               ]
+           ])
     ]
 ;;
 
