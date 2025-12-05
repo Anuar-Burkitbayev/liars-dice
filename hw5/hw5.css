@@ -222,6 +222,7 @@ color: #7f8c8d;
     padding: 1.5rem;
     width: 400px;
     max-width: 100%;
+    margin: 0 auto;
 }
 
 .title-info h1 {
