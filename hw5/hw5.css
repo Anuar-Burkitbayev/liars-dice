@@ -267,19 +267,19 @@ color: #7f8c8d;
     border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    width: 200px;
-    height: 150px;
+    width: 180px;
+    height: 135px;
     z-index: 500;
-    left: 50%;
-    transform: translateX(-50%);
 }
 
 #remote-video-wrapper {
-    top: 20px;
+    top: 10px;
+    right: 20px;
 }
 
 #local-video-wrapper {
-    bottom: 250px;
+    bottom: 10px;
+    right: 20px;
 }
 
 #local-video-wrapper.active,
@@ -361,16 +361,18 @@ color: #7f8c8d;
 @media (max-width: 768px) {
     #local-video-wrapper,
     #remote-video-wrapper {
-        width: 150px;
-        height: 112px;
+        width: 120px;
+        height: 90px;
     }
 
     #remote-video-wrapper {
-        top: 15px;
+        top: 10px;
+        right: 10px;
     }
 
     #local-video-wrapper {
-        bottom: 200px;
+        bottom: 10px;
+        right: 10px;
     }
 
     .video-btn {
