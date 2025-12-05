@@ -36,6 +36,7 @@ type model =
   ; round_message : string option
   ; selected_move_index : int
   ; ai_thinking : bool (* Track if AI is about to move *)
+  ; round_end_ticks : int (* Count ticks since round ended (0 = not ended) *)
   }
 [@@deriving sexp]
 
@@ -44,6 +45,7 @@ let model_init () : model =
   ; round_message = None
   ; selected_move_index = 0
   ; ai_thinking = false
+  ; round_end_ticks = 0
   }
 ;;
 
@@ -91,6 +93,7 @@ let execute_ai_move (m : model) : model =
                     then "You won the round!"
                     else "You lost the round!")
              ; ai_thinking = false
+             ; round_end_ticks = 1
              }
            | Error _ -> { m with ai_thinking = false }))
      | `CallLiar ->
@@ -121,12 +124,23 @@ let component =
     in
     Bonsai.state (module M) ~default_model:(model_init ())
   in
-  (* Set up a clock to check for AI moves periodically *)
+  (* Set up a clock to check for AI moves and auto-progression *)
   let%sub () =
     let callback =
       let%map model = model
       and set_model = set_model in
-      if is_ai_turn model && not model.ai_thinking
+      (* Check for automatic round progression *)
+      if model.round_end_ticks > 0 && Option.is_none (Game.get_winner model.game)
+      then
+        if model.round_end_ticks >= 8 (* 8 ticks * 0.5s = 4 seconds *)
+        then
+          (* Auto-progress to next round *)
+          let game' = Game.next_round_if_possible model.game in
+          set_model { model with game = game'; round_message = None; round_end_ticks = 0 }
+        else
+          (* Increment tick counter *)
+          set_model { model with round_end_ticks = model.round_end_ticks + 1 }
+      else if is_ai_turn model && not model.ai_thinking
       then
         (* Mark AI as thinking and schedule the move *)
         set_model { model with ai_thinking = true }
@@ -139,7 +153,7 @@ let component =
     in
     Bonsai.Clock.every
       ~when_to_start_next_effect:`Every_multiple_of_period_blocking
-      (Time_ns.Span.of_sec 1.5)
+      (Time_ns.Span.of_sec 0.5)
       callback
   in
   let%arr model = model
@@ -201,19 +215,19 @@ let component =
                (* Update game state, AI will move on next clock tick *)
                set_model
                  { model with game = { game with current_round = Some new_round } })
-          | Some `CallLiar ->
-            (match Round.call_liar round with
-             | Error _ -> Effect.Ignore
-             | Ok (winner, _msg) ->
-               let game' = Game.apply_round_result game winner in
-               let round_message =
-                 if Player.equal winner Player.Player1
-                 then "You won the round!"
-                 else "You lost the round!"
-               in
-               set_model { model with game = game'; round_message = Some round_message })))
+           | Some `CallLiar ->
+             (match Round.call_liar round with
+              | Error _ -> Effect.Ignore
+              | Ok (winner, _msg) ->
+                let game' = Game.apply_round_result game winner in
+                let round_message =
+                  if Player.equal winner Player.Player1
+                  then "You won the round!"
+                  else "You lost the round!"
+                in
+                set_model { model with game = game'; round_message = Some round_message; round_end_ticks = 1 })))
   in
-  let overlay_dismiss_handler =
+  let new_round_handler =
     Attr.on_click (fun _ev ->
       match Game.get_winner game with
       | Some _ -> set_model (model_init ())
@@ -277,6 +291,27 @@ let component =
                     ~attrs:[ Attr.class_ "score player2-score" ]
                     [ Node.text (sprintf "Player 2: %d" p2_score) ]
                 ]
+            ; (* System message display *)
+              (match model.round_message, Game.get_winner game with
+               | None, None -> Node.none
+               | Some msg, None ->
+                 Node.div
+                   ~attrs:[ Attr.class_ "system-message-inline" ]
+                   [ Node.text msg ]
+               | _, Some winner ->
+                 let msg =
+                   if Player.equal winner Player.Player1
+                   then "You won the game!"
+                   else "You lost the game!"
+                 in
+                 Node.div
+                   ~attrs:[ Attr.class_ "system-message-inline game-over" ]
+                   [ Node.text msg
+                   ; Node.button
+                       ~attrs:
+                         [ Attr.class_ "btn btn-new-game"; new_round_handler ]
+                       [ Node.text "New Game" ]
+                   ])
             ; Node.p ~attrs:[ Attr.id "turn-info" ] [ Node.text turn_text ]
             ; Node.p
                 ~attrs:[ Attr.id "bid-info" ]
@@ -294,30 +329,6 @@ let component =
             ; move_controls
             ]
         ]
-    ; (* Overlay for round/game message *)
-      (match model.round_message, Game.get_winner game with
-       | None, None -> Node.none
-       | Some msg, None ->
-         Node.div
-           ~attrs:
-             [ Attr.id "round-message"
-             ; Attr.class_ "system-message"
-             ; overlay_dismiss_handler
-             ]
-           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ]
-       | _, Some winner ->
-         let msg =
-           if Player.equal winner Player.Player1
-           then "You won the game!"
-           else "You lost the game!"
-         in
-         Node.div
-           ~attrs:
-             [ Attr.id "round-message"
-             ; Attr.class_ "system-message"
-             ; overlay_dismiss_handler
-             ]
-           [ Node.div ~attrs:[ Attr.class_ "message-content" ] [ Node.text msg ] ])
     ]
 ;;
 
