@@ -494,6 +494,7 @@ type model =
   ; current_game_id : string option
   ; starter : int option
   ; my_player_number : int option
+  ; processing_move : bool
   ; last_error : string option
   }
 [@@deriving sexp]
@@ -511,6 +512,7 @@ let model_init () : model =
   ; current_game_id = None
   ; starter = None
   ; my_player_number = None
+  ; processing_move = false
   ; last_error = None
   }
 ;;
@@ -809,8 +811,44 @@ let component =
              | _ -> model.my_player_number
            in
            let rotated = maybe_rotate_game_for_starter game_state my_player_number in
+           (* Check if round just ended (game has no current_round but previous did) *)
+           let should_show_round_end =
+             Option.is_none (Game.current_round rotated)
+             && Option.is_some (Game.current_round model.game)
+             && model.round_end_ticks = 0
+           in
+           let round_message =
+             if should_show_round_end
+             then (
+               let winner_opt =
+                 let p1_old = Game.rounds_won_by model.game Player.Player1 in
+                 let p2_old = Game.rounds_won_by model.game Player.Player2 in
+                 let p1_new = Game.rounds_won_by rotated Player.Player1 in
+                 let p2_new = Game.rounds_won_by rotated Player.Player2 in
+                 if p1_new > p1_old
+                 then Some Player.Player1
+                 else if p2_new > p2_old
+                 then Some Player.Player2
+                 else None
+               in
+               match winner_opt with
+               | Some Player.Player1 -> Some "You won the round!"
+               | Some Player.Player2 -> Some "You lost the round!"
+               | None -> model.round_message)
+             else model.round_message
+           in
+           let round_end_ticks =
+             if should_show_round_end then 1 else model.round_end_ticks
+           in
            set_model
-             { model with game = rotated; starter; my_player_number; last_error = None })
+             { model with
+               game = rotated
+             ; starter
+             ; my_player_number
+             ; round_message
+             ; round_end_ticks
+             ; last_error = None
+             })
     in
     Bonsai.Clock.every
       ~when_to_start_next_effect:`Every_multiple_of_period_blocking
@@ -837,7 +875,23 @@ let component =
         if model.round_end_ticks >= 8
         then (
           let game' = Game.next_round_if_possible model.game in
-          set_model { model with game = game'; round_message = None; round_end_ticks = 0 })
+          match model.current_game_id with
+          | Some gid when equal_game_mode model.game_mode OnlineMode ->
+            (* Sync new round to Firebase *)
+            let open Vdom.Effect.Let_syntax in
+            let%bind res =
+              Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+            in
+            (match res with
+             | Ok () ->
+               set_model
+                 { model with game = game'; round_message = None; round_end_ticks = 0 }
+             | Error err ->
+               set_model
+                 { model with last_error = Some ("Sync new round failed: " ^ err) })
+          | _ ->
+            set_model
+              { model with game = game'; round_message = None; round_end_ticks = 0 })
         else set_model { model with round_end_ticks = model.round_end_ticks + 1 }
       else if
         equal_game_mode model.game_mode AIMode
@@ -906,7 +960,12 @@ let component =
       let game_in_progress =
         Option.is_none (Game.get_winner game) && Option.is_some round
       in
-      let buttons_enabled = game_in_progress && is_player_turn in
+      let buttons_enabled =
+        game_in_progress
+        && is_player_turn
+        && (not model.processing_move)
+        && model.round_end_ticks = 0
+      in
       let valid_moves =
         Option.value_map round ~default:[] ~f:(fun r -> Round.get_all_moves r)
       in
@@ -932,58 +991,75 @@ let component =
               match selected_move with
               | None -> Effect.Ignore
               | Some (`Bid bid) ->
-                (match Round.make_bid round bid with
-                 | Error _ -> Effect.Ignore
-                 | Ok new_round ->
-                   let new_game = { game with current_round = Some new_round } in
-                   (match model.current_game_id with
-                    | Some gid ->
-                      let open Vdom.Effect.Let_syntax in
-                      let%bind res =
-                        Multiplayer.save_game_state_effect
-                          ~game_id:gid
-                          ~game_state:new_game
-                      in
-                      (match res with
-                       | Ok () -> set_model { model with game = new_game }
-                       | Error err ->
-                         set_model
-                           { model with last_error = Some ("Sync failed: " ^ err) })
-                    | None -> set_model { model with game = new_game }))
+                if model.processing_move
+                then Effect.Ignore
+                else (
+                  match Round.make_bid round bid with
+                  | Error _ -> Effect.Ignore
+                  | Ok new_round ->
+                    let new_game = { game with current_round = Some new_round } in
+                    (match model.current_game_id with
+                     | Some gid ->
+                       let open Vdom.Effect.Let_syntax in
+                       let%bind _ = set_model { model with processing_move = true } in
+                       let%bind res =
+                         Multiplayer.save_game_state_effect
+                           ~game_id:gid
+                           ~game_state:new_game
+                       in
+                       (match res with
+                        | Ok () ->
+                          set_model
+                            { model with game = new_game; processing_move = false }
+                        | Error err ->
+                          set_model
+                            { model with
+                              last_error = Some ("Sync failed: " ^ err)
+                            ; processing_move = false
+                            })
+                     | None -> set_model { model with game = new_game }))
               | Some `CallLiar ->
-                (match Round.call_liar round with
-                 | Error _ -> Effect.Ignore
-                 | Ok (winner, _msg) ->
-                   let game' = Game.apply_round_result game winner in
-                   let round_message =
-                     if Player.equal winner Player.Player1
-                     then "You won the round!"
-                     else "You lost the round!"
-                   in
-                   (match model.current_game_id with
-                    | Some gid ->
-                      let open Vdom.Effect.Let_syntax in
-                      let%bind res =
-                        Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
-                      in
-                      (match res with
-                       | Ok () ->
-                         set_model
-                           { model with
-                             game = game'
-                           ; round_message = Some round_message
-                           ; round_end_ticks = 1
-                           }
-                       | Error err ->
-                         set_model
-                           { model with last_error = Some ("Sync failed: " ^ err) })
-                    | None ->
-                      set_model
-                        { model with
-                          game = game'
-                        ; round_message = Some round_message
-                        ; round_end_ticks = 1
-                        }))))
+                if model.processing_move
+                then Effect.Ignore
+                else (
+                  match Round.call_liar round with
+                  | Error _ -> Effect.Ignore
+                  | Ok (winner, _msg) ->
+                    let game' = Game.apply_round_result game winner in
+                    let round_message =
+                      if Player.equal winner Player.Player1
+                      then "You won the round!"
+                      else "You lost the round!"
+                    in
+                    (match model.current_game_id with
+                     | Some gid ->
+                       let open Vdom.Effect.Let_syntax in
+                       let%bind _ = set_model { model with processing_move = true } in
+                       let%bind res =
+                         Multiplayer.save_game_state_effect ~game_id:gid ~game_state:game'
+                       in
+                       (match res with
+                        | Ok () ->
+                          set_model
+                            { model with
+                              game = game'
+                            ; round_message = Some round_message
+                            ; round_end_ticks = 1
+                            ; processing_move = false
+                            }
+                        | Error err ->
+                          set_model
+                            { model with
+                              last_error = Some ("Sync failed: " ^ err)
+                            ; processing_move = false
+                            })
+                     | None ->
+                       set_model
+                         { model with
+                           game = game'
+                         ; round_message = Some round_message
+                         ; round_end_ticks = 1
+                         }))))
       in
       let move_controls =
         Node.div
@@ -1122,7 +1198,12 @@ let component =
     let game_in_progress =
       Option.is_none (Game.get_winner model.game) && Option.is_some round
     in
-    let buttons_enabled = game_in_progress && is_player_turn in
+    let buttons_enabled =
+      game_in_progress
+      && is_player_turn
+      && (not model.processing_move)
+      && model.round_end_ticks = 0
+    in
     let valid_moves =
       Option.value_map round ~default:[] ~f:(fun r -> Round.get_all_moves r)
     in
