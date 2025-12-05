@@ -394,7 +394,7 @@ let component =
              [ Node.div
                  ~attrs:[ Attr.class_ "message-content" ]
                  [ Node.text msg
-                 ; Node.p [ Node.text "Play another?" ]
+                 ; Node.p ~attrs:[ Attr.style (Css_gen.font_size (`Rem 1.2)) ] [ Node.text "Play another?" ]
                  ; Node.div
                      ~attrs:[ Attr.class_ "mode-buttons" ]
                      [ Node.button
