@@ -553,8 +553,9 @@ let execute_ai_move (m : model) : model =
           (match Round.call_liar round with
            | Ok (winner, _) ->
              let game' = Game.apply_round_result m.game winner in
+             let game_with_round_cleared = { game' with current_round = None } in
              { m with
-               game = game'
+               game = game_with_round_cleared
              ; round_message =
                  Some
                    (if Player.equal winner Player.Player1
@@ -568,8 +569,9 @@ let execute_ai_move (m : model) : model =
        (match Round.call_liar round with
         | Ok (winner, _) ->
           let game' = Game.apply_round_result m.game winner in
+          let game_with_round_cleared = { game' with current_round = None } in
           { m with
-            game = game'
+            game = game_with_round_cleared
           ; round_message =
               Some
                 (if Player.equal winner Player.Player1
@@ -961,12 +963,10 @@ let component =
       let turn_text =
         match current_player with
         | None -> "Game over"
-        | Some Player.Player1 -> "Player 1's Turn"
-        | Some Player.Player2 -> "Player 2's Turn"
+        | Some Player.Player1 -> "Your Turn"
+        | Some Player.Player2 -> "Opponent's Turn"
       in
-      let is_player_turn =
-        Option.value_map current_player ~default:false ~f:(Player.equal Player.Player1)
-      in
+      let is_player_turn = is_local_player_turn model in
       let game_in_progress =
         Option.is_none (Game.get_winner game) && Option.is_some round
       in
@@ -1040,6 +1040,8 @@ let component =
                   | Error _ -> Effect.Ignore
                   | Ok (winner, _msg) ->
                     let game' = Game.apply_round_result game winner in
+                    (* Clear the current round so both players can detect round end *)
+                    let game_with_round_cleared = { game' with current_round = None } in
                     let round_message =
                       if Player.equal winner Player.Player1
                       then "You won the round!"
@@ -1051,7 +1053,9 @@ let component =
                        let%bind _ = set_model { model with processing_move = true } in
                        (* Save canonical game state (Player1 perspective) to Firebase *)
                        let canonical_game =
-                         get_canonical_game_state game' model.my_player_number
+                         get_canonical_game_state
+                           game_with_round_cleared
+                           model.my_player_number
                        in
                        let%bind res =
                          Multiplayer.save_game_state_effect
@@ -1062,7 +1066,7 @@ let component =
                         | Ok () ->
                           set_model
                             { model with
-                              game = game'
+                              game = game_with_round_cleared
                             ; round_message = Some round_message
                             ; round_end_ticks = 1
                             ; processing_move = false
@@ -1076,7 +1080,7 @@ let component =
                      | None ->
                        set_model
                          { model with
-                           game = game'
+                           game = game_with_round_cleared
                          ; round_message = Some round_message
                          ; round_end_ticks = 1
                          }))))
@@ -1261,6 +1265,7 @@ let component =
                | Error _ -> Effect.Ignore
                | Ok (winner, _msg) ->
                  let game' = Game.apply_round_result model.game winner in
+                 let game_with_round_cleared = { game' with current_round = None } in
                  let round_message =
                    if Player.equal winner Player.Player1
                    then "You won the round!"
@@ -1268,7 +1273,7 @@ let component =
                  in
                  set_model
                    { model with
-                     game = game'
+                     game = game_with_round_cleared
                    ; round_message = Some round_message
                    ; round_end_ticks = 1
                    })))
