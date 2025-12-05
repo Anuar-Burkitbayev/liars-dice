@@ -305,16 +305,6 @@ let component =
                   in
                   set_model { model with game = game'; round_message = Some round_message; round_end_ticks = 1 })))
     in
-    let new_round_handler =
-      Attr.on_click (fun _ev ->
-        match Game.get_winner game with
-        | Some _ -> set_model (model_init ())
-        | None ->
-          (* Start a new round *)
-          let game' = Game.next_round_if_possible game in
-          (* AI will move on next clock tick if needed *)
-          set_model { model with game = game'; round_message = None })
-    in
     (* Dropdown for valid moves *)
     let move_controls =
       Node.div
@@ -404,9 +394,22 @@ let component =
              [ Node.div
                  ~attrs:[ Attr.class_ "message-content" ]
                  [ Node.text msg
-                 ; Node.button
-                     ~attrs:[ Attr.class_ "btn btn-new-game"; new_round_handler ]
-                     [ Node.text "New Game" ]
+                 ; Node.div
+                     ~attrs:[ Attr.class_ "mode-buttons" ]
+                     [ Node.button
+                         ~attrs:
+                           [ Attr.class_ "btn btn-mode"
+                           ; Attr.on_click (fun _ev ->
+                               set_model { (model_init ()) with game_mode = AIMode; game = Game.init ~dice_per_player:5 })
+                           ]
+                         [ Node.text "AI" ]
+                     ; Node.button
+                         ~attrs:
+                           [ Attr.class_ "btn btn-mode btn-disabled"
+                           ; Attr.bool_property "disabled" true
+                           ]
+                         [ Node.text "Online" ]
+                     ]
                  ]
              ])
       ]
