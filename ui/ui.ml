@@ -108,6 +108,7 @@ let execute_ai_move (m : model) : model =
                  then "You won the round!"
                  else "You lost the round!")
           ; ai_thinking = false
+          ; round_end_ticks = 1
           }
         | Error _ -> { m with ai_thinking = false }))
 ;;
